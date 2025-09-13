@@ -103,7 +103,7 @@ async function h2hHandler(req, res) {
     }
 
     const minHold = req.query.minHold !== undefined ? Number(req.query.minHold) : null;
-    const limit   = req.query.limit   !== undefined ? Math.max(1, Number(req.query.limit)) : null;
+    const limit = req.query.limit !== undefined ? Math.max(1, Number(req.query.limit)) : null;
     const compact = String(req.query.compact || "").toLowerCase() === "true";
 
     const fetcher = FETCHERS[sport];
@@ -156,7 +156,7 @@ async function h2hHandler(req, res) {
 // Dynamic route
 app.get("/api/:sport/h2h", h2hHandler);
 
-// Explicit aliases → ensure /api/mlb/h2h, /api/nba/h2h, etc. always exist
+// Explicit aliases so /api/mlb/h2h, /api/nba/h2h, etc. always exist
 ["mlb", "nba", "ncaaf", "ncaab", "tennis", "soccer"].forEach((sport) => {
   app.get(`/api/${sport}/h2h`, (req, res) => {
     req.params.sport = sport;

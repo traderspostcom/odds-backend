@@ -156,4 +156,11 @@ app.get("/api/:sport/h2h", async (req, res) => {
 
     res.json(data);
   } catch (e) {
-    console.error("mul
+    console.error("multi-sport h2h error:", e);
+    res.status(500).json({ error: String(e) });
+  }
+});
+// ------------------ End Universal Multi-Sport H2H ------------------
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));

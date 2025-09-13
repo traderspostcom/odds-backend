@@ -145,4 +145,39 @@ function normalizeGames(games, { minHold } = {}) {
 }
 
 // ------------- Per-sport normalized fetchers (exports) -------------
-// These mirror your getNFLH2HNormalized sig
+// These mirror your getNFLH2HNormalized signature: ({ minHold }) => Promise<array>
+
+export async function getMLBH2HNormalized({ minHold } = {}) {
+  const games = await fetchH2HOdds("baseball_mlb");
+  return normalizeGames(games, { minHold });
+}
+
+export async function getNBAH2HNormalized({ minHold } = {}) {
+  const games = await fetchH2HOdds("basketball_nba");
+  return normalizeGames(games, { minHold });
+}
+
+export async function getNCAAFH2HNormalized({ minHold } = {}) {
+  const games = await fetchH2HOdds("americanfootball_ncaaf");
+  return normalizeGames(games, { minHold });
+}
+
+export async function getNCAABH2HNormalized({ minHold } = {}) {
+  const games = await fetchH2HOdds("basketball_ncaab");
+  return normalizeGames(games, { minHold });
+}
+
+// Tennis has multiple tours; start with ATP (add WTA similarly if you want)
+export async function getTennisH2HNormalized({ minHold } = {}) {
+  const atp = await fetchH2HOdds("tennis_atp");
+  // If you also want WTA, fetch and concat: const wta = await fetchH2HOdds("tennis_wta"); const games = [...atp, ...wta];
+  return normalizeGames(atp, { minHold });
+}
+
+// Soccer has many leagues; start with MLS (add EPL/others later)
+export async function getSoccerH2HNormalized({ minHold } = {}) {
+  const mls = await fetchH2HOdds("soccer_usa_mls");
+  // To include more leagues, fetch each and concat them into one array.
+  return normalizeGames(mls, { minHold });
+}
+// ================= END ADDITION =================

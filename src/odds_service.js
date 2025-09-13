@@ -58,6 +58,7 @@ export async function getNFLH2HNormalized({ minHold = null } = {}) {
   }
   return out;
 }
+
 // ======= ADD BELOW YOUR EXISTING NFL HELPERS =======
 
 // The Odds API settings (already used for NFL raw)
@@ -85,7 +86,110 @@ function americanToProb(odds) {
   return o > 0 ? 100 / (o + 100) : (-o) / ((-o) + 100);
 }
 
-// Helper: normalize a list of Odds API games to your NFL-like shape
+/* ------------------------------------------------------------------
+   BOOK CONFIG (aliases, allow-list, tie-break) — comprehensive set
+------------------------------------------------------------------- */
+
+// Map provider keys → pretty brand names (covers common variants)
+const BOOK_ALIASES = {
+  // --- US ---
+  betmgm: "BetMGM",
+  caesars: "Caesars",
+  williamhill_us: "William Hill",
+  williamhill: "William Hill",
+  draftkings: "DraftKings",
+  fanduel: "FanDuel",
+  fanatics: "Fanatics",
+  fanatics_sportsbook: "Fanatics",
+  espnbet: "ESPN BET",
+  betrivers: "BetRivers",
+  betparx: "BetPARX",
+  betonlineag: "BetOnline",
+  betonline: "BetOnline",
+  bovada: "Bovada",
+  mybookieag: "MyBookie.ag",
+  mybookie: "MyBookie.ag",
+
+  // --- UK / Ireland ---
+  betfair: "Betfair",
+  betfair_exchange: "Betfair",
+  betvictor: "Bet Victor",
+  ladbrokes: "Ladbrokes",
+  matchbook: "Matchbook",
+  paddypower: "Paddy Power",
+  paddy_power: "Paddy Power",
+  unibet: "Unibet",
+
+  // --- EU / Intl ---
+  "1xbet": "1xBet",
+  betclic: "Betclic",
+  betsson: "Betsson",
+  pinnacle: "Pinnacle",
+
+  // --- Australia / NZ ---
+  neds: "Neds",
+  sportsbet: "Sportsbet",
+  tab: "TAB",
+  ladbrokes_au: "Ladbrokes",
+  unibet_au: "Unibet"
+};
+
+// Comma-separated env var to control which books your API keeps.
+// Default includes the full list above.
+// Example (US-only) in Render: ALLOWED_BOOKS="betmgm,caesars,draftkings,fanduel,fanatics,espnbet,betrivers,betparx,betonlineag,bovada,mybookieag"
+const ALLOWED_BOOKS = new Set(
+  (process.env.ALLOWED_BOOKS ||
+    [
+      // US
+      "betmgm","caesars","draftkings","fanduel","fanatics","espnbet",
+      "betrivers","betparx","betonlineag","betonline","bovada","mybookieag","mybookie","williamhill_us","williamhill",
+      // UK/IE
+      "betfair","betfair_exchange","betvictor","ladbrokes","matchbook","paddypower","paddy_power","unibet",
+      // EU / Intl
+      "1xbet","betclic","betsson","pinnacle",
+      // AU/NZ
+      "neds","sportsbet","tab","ladbrokes_au","unibet_au"
+    ].join(",")
+  )
+  .split(",")
+  .map(s => s.trim().toLowerCase())
+);
+
+// Priority to break ties when prices are equal (left = highest priority)
+const BOOK_PRIORITY = [
+  // Sharp/exchanges first
+  "pinnacle","betfair_exchange","betfair","matchbook",
+  // Major US books
+  "williamhill","williamhill_us","caesars","betmgm","draftkings","fanduel","fanatics",
+  "betrivers","betparx","betonlineag","betonline","bovada","mybookieag","mybookie",
+  // UK/EU
+  "unibet","betvictor","paddypower","ladbrokes","betclic","betsson","1xbet",
+  // AU
+  "sportsbet","tab","neds","ladbrokes_au","unibet_au"
+];
+
+function prettyBookName(key, title) {
+  const k = (key || "").toLowerCase();
+  return BOOK_ALIASES[k] || title || key || "Unknown";
+}
+
+function betterOf(a, b) {
+  // Pick by higher American price; if equal, prefer by BOOK_PRIORITY order
+  if (!a) return b;
+  if (!b) return a;
+  if (a.price !== b.price) return a.price > b.price ? a : b;
+  const ia = BOOK_PRIORITY.indexOf((a.key || "").toLowerCase());
+  const ib = BOOK_PRIORITY.indexOf((b.key || "").toLowerCase());
+  if (ia === -1 && ib === -1) return a;
+  if (ia === -1) return b;
+  if (ib === -1) return a;
+  return ia < ib ? a : b;
+}
+
+/* ------------------------------------------------------------------
+   Helper: normalize a list of Odds API games to NFL-like shape
+   (now with book filtering, labels, and tie-break)
+------------------------------------------------------------------- */
 function normalizeGames(games, { minHold } = {}) {
   const out = [];
 
@@ -98,6 +202,10 @@ function normalizeGames(games, { minHold } = {}) {
     let bestHome = null;
 
     for (const bk of g.bookmakers || []) {
+      const key = (bk.key || "").toLowerCase();
+      if (!ALLOWED_BOOKS.has(key)) continue; // filter to your chosen books
+
+      const label = prettyBookName(key, bk.title);
       const m = (bk.markets || []).find((m) => m.key === "h2h");
       if (!m) continue;
 
@@ -105,12 +213,12 @@ function normalizeGames(games, { minHold } = {}) {
       const homeOutcome = m.outcomes.find((o) => o.name === home);
 
       if (awayOutcome) {
-        const price = Number(awayOutcome.price);
-        if (!bestAway || price > bestAway.price) bestAway = { book: bk.title || bk.key, price };
+        const cand = { key, book: label, price: Number(awayOutcome.price) };
+        bestAway = betterOf(bestAway, cand);
       }
       if (homeOutcome) {
-        const price = Number(homeOutcome.price);
-        if (!bestHome || price > bestHome.price) bestHome = { book: bk.title || bk.key, price };
+        const cand = { key, book: label, price: Number(homeOutcome.price) };
+        bestHome = betterOf(bestHome, cand);
       }
     }
 
@@ -124,7 +232,7 @@ function normalizeGames(games, { minHold } = {}) {
     // If you want to filter here, uncomment the next line (choose your rule):
     // if (typeof minHold === "number" && hold > minHold) continue;
 
-    const sum = pAway + pHome;
+    const sum = pAway + pHome || 1;
     const devigAway = pAway / sum;
     const devigHome = pHome / sum;
 
@@ -170,7 +278,9 @@ export async function getNCAABH2HNormalized({ minHold } = {}) {
 // Tennis has multiple tours; start with ATP (add WTA similarly if you want)
 export async function getTennisH2HNormalized({ minHold } = {}) {
   const atp = await fetchH2HOdds("tennis_atp");
-  // If you also want WTA, fetch and concat: const wta = await fetchH2HOdds("tennis_wta"); const games = [...atp, ...wta];
+  // If you also want WTA, fetch and concat:
+  // const wta = await fetchH2HOdds("tennis_wta");
+  // const games = [...atp, ...wta];
   return normalizeGames(atp, { minHold });
 }
 

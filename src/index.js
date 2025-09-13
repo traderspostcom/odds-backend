@@ -5,9 +5,7 @@ import cors from "cors";
 
 // Existing NFL fetchers
 import { getNFLH2HRaw, getNFLH2HNormalized } from "./odds_service.js";
-
-// If/when you add other sports, export their fetchers from odds_service.js
-// and uncomment these lines:
+// When you add other sports, import them like:
 // import {
 //   getMLBH2HNormalized,
 //   getNBAH2HNormalized,
@@ -20,7 +18,7 @@ import { getNFLH2HRaw, getNFLH2HNormalized } from "./odds_service.js";
 const app = express();
 app.use(cors());
 
-// Tiny request logger (optional)
+// Tiny request logger
 app.use((req, _res, next) => {
   console.log(req.method, req.url);
   next();
@@ -82,8 +80,7 @@ app.get("/api/nfl/h2h", async (req, res) => {
 });
 
 // -------------------- Universal Multi-Sport H2H --------------------
-// This adds: /api/{sport}/h2h for nfl, mlb, nba, ncaaf, ncaab, tennis, soccer
-// Returns [] for sports you haven't wired yet (so tools don't error).
+// Adds: /api/{sport}/h2h for nfl, mlb, nba, ncaaf, ncaab, tennis, soccer
 const ALLOWED_SPORTS = new Set(["nfl", "mlb", "nba", "ncaaf", "ncaab", "tennis", "soccer"]);
 
 // Map sport -> fetcher. Start with NFL; add others as you implement & export them.
@@ -97,10 +94,8 @@ const FETCHERS = {
   // soccer: async ({ minHold }) => getSoccerH2HNormalized({ minHold }),
 };
 
-// Generic H2H endpoint for all sports.
-// Query params: ?minHold=0.02&limit=5&compact=true
-// Shape of compact output mirrors your NFL compact response as best as possible.
-app.get("/api/:sport/h2h", async (req, res) => {
+// Shared handler for all H2H routes
+async function h2hHandler(req, res) {
   try {
     const sport = String(req.params.sport || "").toLowerCase();
     if (!ALLOWED_SPORTS.has(sport)) {
@@ -108,12 +103,12 @@ app.get("/api/:sport/h2h", async (req, res) => {
     }
 
     const minHold = req.query.minHold !== undefined ? Number(req.query.minHold) : null;
-    const limit = req.query.limit !== undefined ? Math.max(1, Number(req.query.limit)) : null;
+    const limit   = req.query.limit   !== undefined ? Math.max(1, Number(req.query.limit)) : null;
     const compact = String(req.query.compact || "").toLowerCase() === "true";
 
     const fetcher = FETCHERS[sport];
 
-    // If sport not wired yet, return empty list (200) so the client doesn't error out.
+    // If sport not wired yet, return empty list (200) so clients don't break.
     if (typeof fetcher !== "function") {
       res.set("x-warning", "not_implemented");
       return res.status(200).json([]);
@@ -122,13 +117,10 @@ app.get("/api/:sport/h2h", async (req, res) => {
     let data = await fetcher({ minHold });
     if (!Array.isArray(data)) data = [];
 
-    // Apply limit consistently
     if (limit) data = data.slice(0, limit);
 
-    // Compact view: normalize common fields
     if (compact) {
       data = data.map((g) => {
-        // Try to adapt to either your NFL shape or possible alt shapes
         const best = g.best || g.best_prices || {};
         const devig = g.devig || {};
         const teamNames = Object.keys(best);
@@ -159,7 +151,19 @@ app.get("/api/:sport/h2h", async (req, res) => {
     console.error("multi-sport h2h error:", e);
     res.status(500).json({ error: String(e) });
   }
+}
+
+// Dynamic route
+app.get("/api/:sport/h2h", h2hHandler);
+
+// Explicit aliases → ensure /api/mlb/h2h, /api/nba/h2h, etc. always exist
+["mlb", "nba", "ncaaf", "ncaab", "tennis", "soccer"].forEach((sport) => {
+  app.get(`/api/${sport}/h2h`, (req, res) => {
+    req.params.sport = sport;
+    return h2hHandler(req, res);
+  });
 });
+
 // ------------------ End Universal Multi-Sport H2H ------------------
 
 const PORT = process.env.PORT || 3000;

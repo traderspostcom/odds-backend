@@ -1,8 +1,21 @@
-// src/odds_math.js
+// ================== Probability & Odds Conversions ==================
 
-// Convert American odds to implied probability (0–1)
-export const ipFromAmerican = (a) =>
-  a > 0 ? 100 / (a + 100) : (-a) / ((-a) + 100);
+// Convert American odds → implied probability (0–1)
+export function ipFromAmerican(a) {
+  const n = Number(a);
+  if (!Number.isFinite(n) || n === 0) return null;
+  return n > 0 ? 100 / (n + 100) : (-n) / ((-n) + 100);
+}
+
+// Convert implied probability (0–1) → American odds
+export function amFromIp(prob) {
+  if (prob <= 0 || prob >= 1) return null;
+  return prob > 0.5
+    ? -(prob / (1 - prob)) * 100
+    : ((1 - prob) / prob) * 100;
+}
+
+// ================== Expected Value (EV) ==================
 
 // Expected value per 1 unit risk, given American odds and your model win prob
 export function evAmerican(american, pModel) {
@@ -10,6 +23,8 @@ export function evAmerican(american, pModel) {
   const win = american > 0 ? american / 100 : 100 / (-american);
   return pModel * win - (1 - pModel) * risk;
 }
+
+// ================== Best Line & Market Metrics ==================
 
 // From one game blob, find best price per team and compute hold + de-vigged probs
 export function bestLinesAndMetrics(game) {
@@ -35,7 +50,8 @@ export function bestLinesAndMetrics(game) {
   if (teams.length !== 2) return null;
 
   const [A, B] = teams;
-  const ipA = sides[A].ip, ipB = sides[B].ip;
+  const ipA = sides[A].ip;
+  const ipB = sides[B].ip;
   const hold = ipA + ipB - 1;
 
   // Proportional de-vig

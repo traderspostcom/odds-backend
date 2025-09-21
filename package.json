@@ -2,11 +2,11 @@
   "name": "odds-backend",
   "version": "1.0.0",
   "description": "Sports odds backend with Odds API + Google Sheets integration",
-  "main": "src/index.js",
+  "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js",
+    "start": "node index.js",
+    "dev": "nodemon index.js",
     "test": "echo \"No tests specified\" && exit 0"
   },
   "dependencies": {

@@ -52,16 +52,38 @@ async function oddsHandler(req, res) {
     if (compact) {
       data = data.map((g) => {
         const best = g.best || {};
-        const formattedBest = {};
+        let formattedBest = {};
 
-        for (const [side, obj] of Object.entries(best)) {
-          formattedBest[side] = obj
-            ? {
-                book: obj.book,
-                price: obj.price,
-                ...(obj.point !== undefined ? { point: obj.point } : {}) // ✅ include spread/total points
-              }
-            : null;
+        if (market === "h2h") {
+          // Show as home vs away
+          formattedBest = {
+            home: best[g.home] ? { book: best[g.home].book, price: best[g.home].price } : null,
+            away: best[g.away] ? { book: best[g.away].book, price: best[g.away].price } : null
+          };
+        }
+
+        if (market === "spreads") {
+          // Sort spreads: favorite (more negative) vs underdog
+          const sides = Object.values(best).filter(Boolean);
+          const favorite = sides.sort((a, b) => (a.point ?? 0) - (b.point ?? 0))[0];
+          const underdog = sides.find(s => s !== favorite);
+
+          formattedBest = {
+            FAV: favorite ? { book: favorite.book, price: favorite.price, point: favorite.point } : null,
+            DOG: underdog ? { book: underdog.book, price: underdog.price, point: underdog.point } : null
+          };
+        }
+
+        if (market === "totals") {
+          // Always O then U
+          formattedBest = {
+            O: best["sideA"] && best["sideA"].point !== undefined
+              ? { book: best["sideA"].book, price: best["sideA"].price, point: best["sideA"].point }
+              : null,
+            U: best["sideB"] && best["sideB"].point !== undefined
+              ? { book: best["sideB"].book, price: best["sideB"].price, point: best["sideB"].point }
+              : null
+          };
         }
 
         return {

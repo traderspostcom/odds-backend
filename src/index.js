@@ -20,8 +20,6 @@ app.use(cors());
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 /* -------------------- Multi-Sport Router -------------------- */
-
-// Supported sports + their fetchers
 const FETCHERS = {
   nfl:   { h2h: getNFLH2HNormalized, spreads: getNFLSpreadsNormalized, totals: getNFLTotalsNormalized },
   mlb:   { h2h: getMLBH2HNormalized, spreads: getMLBSpreadsNormalized, totals: getMLBTotalsNormalized },
@@ -32,7 +30,6 @@ const FETCHERS = {
   soccer:{ h2h: getSoccerH2HNormalized }
 };
 
-// Generic handler for any sport + market
 async function oddsHandler(req, res) {
   try {
     const sport = String(req.params.sport || "").toLowerCase();
@@ -43,7 +40,9 @@ async function oddsHandler(req, res) {
     }
 
     const minHold = req.query.minHold !== undefined ? Number(req.query.minHold) : null;
-    const limit   = req.query.limit   !== undefined ? Math.max(1, Number(req.query.limit)) : null;
+    let limit = req.query.limit !== undefined ? Math.max(1, Number(req.query.limit)) : null;
+    if (!limit) limit = 10; // ✅ Default to 10
+
     const compact = String(req.query.compact || "").toLowerCase() === "true";
 
     let data = await FETCHERS[sport][market]({ minHold });
@@ -52,7 +51,19 @@ async function oddsHandler(req, res) {
 
     if (compact) {
       data = data.map((g) => {
-        const best  = g.best || {};
+        const best = g.best || {};
+        const formattedBest = {};
+
+        for (const [side, obj] of Object.entries(best)) {
+          formattedBest[side] = obj
+            ? {
+                book: obj.book,
+                price: obj.price,
+                ...(obj.point !== undefined ? { point: obj.point } : {}) // ✅ include spread/total points
+              }
+            : null;
+        }
+
         return {
           gameId: g.gameId,
           time: g.commence_time,
@@ -60,7 +71,7 @@ async function oddsHandler(req, res) {
           away: g.away,
           market: g.market,
           hold: typeof g.hold === "number" ? Number(g.hold.toFixed(4)) : null,
-          best
+          best: formattedBest
         };
       });
     }
@@ -72,7 +83,6 @@ async function oddsHandler(req, res) {
   }
 }
 
-// Routes: /api/:sport/:market
 app.get("/api/:sport/:market", oddsHandler);
 
 const PORT = process.env.PORT || 3000;

@@ -53,10 +53,11 @@ function isWithinScanWindow() {
   return true; // start == stop → always on
 }
 
-/* -------------------- Daily Counter -------------------- */
+/* -------------------- Daily + Monthly Counter -------------------- */
 let f5ScanCount = 0;
 let gameScanCount = 0;
 let creditCount = 0;
+let monthlyCredits = 0;
 let lastDateET = null;
 
 function resetCountersIfNewDay() {
@@ -76,6 +77,18 @@ function resetCountersIfNewDay() {
     creditCount = 0;
     console.log(`📅 New ET day: counters reset (${today})`);
   }
+}
+
+/* -------------------- Monthly Credit Safeguard -------------------- */
+function canUseCredits(needed) {
+  const limit = parseInt(process.env.MONTHLY_CREDIT_LIMIT || "19000");
+  if (monthlyCredits + needed > limit) {
+    console.warn(
+      `🚨 Credit safeguard triggered! Monthly cap of ${limit} would be exceeded (currently ${monthlyCredits}, need +${needed}). Skipping scan.`
+    );
+    return false;
+  }
+  return true;
 }
 
 /* -------------------- Multi-Sport Router -------------------- */
@@ -107,6 +120,10 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
       return res.json({ message: "Outside scan window", limit: 0 });
     }
 
+    if (!canUseCredits(2)) {
+      return res.json({ message: "Monthly credit limit reached", limit: 0 });
+    }
+
     let limit = 5;
     if (String(req.query.telegram || "").toLowerCase() === "true") limit = 15;
     if (req.query.limit !== undefined) {
@@ -120,8 +137,11 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
     let totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
 
     f5ScanCount++;
-    creditCount += 2; // ✅ each F5 scan = 2 API calls
-    console.log(`✅ F5 scan #${f5ScanCount} today → +2 credits (total=${creditCount})`);
+    creditCount += 2;
+    monthlyCredits += 2;
+    console.log(
+      `✅ F5 scan #${f5ScanCount} today → +2 credits (daily=${creditCount}, monthly=${monthlyCredits})`
+    );
 
     const compactMap = (g) => ({
       gameId: g.gameId,
@@ -132,7 +152,13 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
       best: g.best || {},
     });
 
-    res.json({ limit, f5_h2h: h2hLimited.map(compactMap), f5_totals: totalsLimited.map(compactMap), credits_used_today: creditCount });
+    res.json({
+      limit,
+      f5_h2h: h2hLimited.map(compactMap),
+      f5_totals: totalsLimited.map(compactMap),
+      credits_used_today: creditCount,
+      credits_used_month: monthlyCredits
+    });
   } catch (err) {
     console.error("f5_scan error:", err);
     res.status(500).json({ error: String(err) });
@@ -147,6 +173,10 @@ app.get("/api/mlb/game_scan", async (req, res) => {
     if (!isWithinScanWindow()) {
       console.log("⏸️ Full game scan skipped (outside window)");
       return res.json({ message: "Outside scan window", limit: 0 });
+    }
+
+    if (!canUseCredits(4)) {
+      return res.json({ message: "Monthly credit limit reached", limit: 0 });
     }
 
     let limit = 5;
@@ -166,8 +196,11 @@ app.get("/api/mlb/game_scan", async (req, res) => {
     let teamTotalsLimited = Array.isArray(teamTotals) ? teamTotals.slice(0, limit) : [];
 
     gameScanCount++;
-    creditCount += 4; // ✅ each full scan = 4 API calls
-    console.log(`✅ Full game scan #${gameScanCount} today → +4 credits (total=${creditCount})`);
+    creditCount += 4;
+    monthlyCredits += 4;
+    console.log(
+      `✅ Full game scan #${gameScanCount} today → +4 credits (daily=${creditCount}, monthly=${monthlyCredits})`
+    );
 
     const compactMap = (g) => ({
       gameId: g.gameId,
@@ -184,7 +217,8 @@ app.get("/api/mlb/game_scan", async (req, res) => {
       game_totals: totalsLimited.map(compactMap),
       game_spreads: spreadsLimited.map(compactMap),
       game_team_totals: teamTotalsLimited.map(compactMap),
-      credits_used_today: creditCount
+      credits_used_today: creditCount,
+      credits_used_month: monthlyCredits
     });
   } catch (err) {
     console.error("game_scan error:", err);
@@ -250,4 +284,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
   console.log(`⏱️ Scan window set to ${process.env.SCAN_START_HOUR || "12"} → ${process.env.SCAN_STOP_HOUR || "1"} ET`);
+  console.log(`📊 Monthly credit safeguard set at ${process.env.MONTHLY_CREDIT_LIMIT || "19000"} credits`);
 });

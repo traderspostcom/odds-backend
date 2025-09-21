@@ -9,7 +9,8 @@ import {
 
   // MLB
   getMLBH2HNormalized, getMLBSpreadsNormalized, getMLBTotalsNormalized,
-  getMLBF5Normalized, getMLBTeamTotalsNormalized, getMLBAltLinesNormalized,
+  getMLBF5Normalized, getMLBF5H2HNormalized, getMLBF5TotalsNormalized,
+  getMLBTeamTotalsNormalized, getMLBAltLinesNormalized,
 
   // NBA
   getNBAH2HNormalized, getNBASpreadsNormalized, getNBATotalsNormalized,
@@ -25,7 +26,7 @@ import {
 
   // Generic props (any sport / any market)
   getPropsNormalized
-} from "../odds_service.js";   // ✅ correct since odds_service.js is in root
+} from "../odds_service.js";   // ✅ odds_service.js in project root
 
 
 const app = express();
@@ -41,10 +42,11 @@ const FETCHERS = {
     h2h: getMLBH2HNormalized, 
     spreads: getMLBSpreadsNormalized, 
     totals: getMLBTotalsNormalized,
-    f5: getMLBF5Normalized,                  // ✅ First 5
-    team_totals: getMLBTeamTotalsNormalized, // ✅ Team Totals
-    alt: getMLBAltLinesNormalized            // ✅ Alt Lines
-    // props handled dynamically below
+    f5: getMLBF5Normalized,              // ✅ Combined First 5
+    f5_h2h: getMLBF5H2HNormalized,       // ✅ First 5 ML only
+    f5_totals: getMLBF5TotalsNormalized, // ✅ First 5 Totals only
+    team_totals: getMLBTeamTotalsNormalized,
+    alt: getMLBAltLinesNormalized
   },
   nba:   { h2h: getNBAH2HNormalized, spreads: getNBASpreadsNormalized, totals: getNBATotalsNormalized },
   ncaaf: { h2h: getNCAAFH2HNormalized, spreads: getNCAAFSpreadsNormalized, totals: getNCAAFTotalsNormalized },
@@ -75,6 +77,12 @@ async function oddsHandler(req, res) {
     const compact = String(req.query.compact || "").toLowerCase() === "true";
 
     let data = await FETCHERS[sport][market]({ minHold });
+
+    // Combined F5 returns { h2h, totals }
+    if (market === "f5") {
+      return res.json(data);
+    }
+
     if (!Array.isArray(data)) data = [];
     if (limit) data = data.slice(0, limit);
 

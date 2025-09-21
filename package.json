@@ -1,7 +1,6 @@
 {
   "name": "odds-backend",
   "version": "1.0.0",
-  "description": "Sports odds backend with Odds API + Google Sheets integration",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
@@ -11,8 +10,9 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "googleapis": "^133.0.0",
-    "node-fetch": "^3.3.2"
+    "cors": "^2.8.5",
+    "node-fetch": "^3.3.2",
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
     "jest": "^29.7.0"

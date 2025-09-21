@@ -2,7 +2,6 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import fetch from "node-fetch";
 
 import {
   // NFL
@@ -32,57 +31,30 @@ import {
 const app = express();
 app.use(cors());
 
-/* -------------------- Telegram Setup -------------------- */
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const TELEGRAM_URL = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-
-async function sendTelegramMessage(text) {
-  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
-  try {
-    await fetch(TELEGRAM_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text,
-        parse_mode: "Markdown"
-      })
-    });
-  } catch (err) {
-    console.error("❌ Telegram send error:", err);
-  }
-}
-
-/* -------------------- Sharp Detector -------------------- */
-const SHARP_HOLD_MAX = parseFloat(process.env.SHARP_HOLD_MAX || "0.02");
-const SHARP_BOOKS = (process.env.SHARP_BOOKS || "pinnacle,betfair").split(",").map(b => b.toLowerCase());
-const SHARP_ALERTS = (process.env.SHARP_ALERTS || "true").toLowerCase() === "true";
-
-function isSharpSignal(game) {
-  if (!SHARP_ALERTS || !game.hold || !game.best) return false;
-  if (game.hold > SHARP_HOLD_MAX) return false;
-
-  const bestBooks = Object.values(game.best).map(b => (b.book || "").toLowerCase());
-  return bestBooks.some(bk => SHARP_BOOKS.includes(bk));
-}
-
-function formatSharpAlert(g) {
-  const lines = [];
-  lines.push(`🚨 *Sharp Alert* 🚨`);
-  lines.push(`${g.away} @ ${g.home}`);
-  lines.push(`Market: ${g.market.toUpperCase()}`);
-  lines.push(`Hold: ${(g.hold * 100).toFixed(2)}%`);
-  if (g.best) {
-    for (const [side, b] of Object.entries(g.best)) {
-      lines.push(`${side.toUpperCase()}: ${b.price} (${b.book}${b.point ? ` ${b.point}` : ""})`);
-    }
-  }
-  return lines.join("\n");
-}
-
 /* -------------------- Health -------------------- */
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+/* -------------------- Scan Window Helper -------------------- */
+function isWithinScanWindow() {
+  const tz = "America/New_York"; // ET
+  const now = new Date();
+  const hour = parseInt(new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hour: "numeric",
+    hour12: false
+  }).format(now));
+
+  const start = parseInt(process.env.SCAN_START_HOUR || "12"); // default 12:00
+  const stop  = parseInt(process.env.SCAN_STOP_HOUR || "1");   // default 01:00
+
+  if (start < stop) {
+    return hour >= start && hour < stop;
+  }
+  if (start > stop) {
+    return hour >= start || hour < stop;
+  }
+  return true; // start == stop → always on
+}
 
 /* -------------------- Multi-Sport Router -------------------- */
 const FETCHERS = {
@@ -91,8 +63,8 @@ const FETCHERS = {
     h2h: getMLBH2HNormalized, 
     spreads: getMLBSpreadsNormalized, 
     totals: getMLBTotalsNormalized,
-    f5_h2h: getMLBF5H2HNormalized,
-    f5_totals: getMLBF5TotalsNormalized,
+    f5_h2h: getMLBF5H2HNormalized,        // ✅ First 5 Moneyline
+    f5_totals: getMLBF5TotalsNormalized,  // ✅ First 5 Totals
     team_totals: getMLBTeamTotalsNormalized,
     alt: getMLBAltLinesNormalized
   },
@@ -106,6 +78,11 @@ const FETCHERS = {
 /* -------------------- MLB F5 Scan -------------------- */
 app.get("/api/mlb/f5_scan", async (req, res) => {
   try {
+    if (!isWithinScanWindow()) {
+      console.log("⏸️ F5 scan skipped (outside window)");
+      return res.json({ message: "Outside scan window", limit: 0 });
+    }
+
     let limit = 5;
     if (String(req.query.telegram || "").toLowerCase() === "true") limit = 15;
     if (req.query.limit !== undefined) {
@@ -124,20 +101,10 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
       home: g.home,
       away: g.away,
       market: g.market,
-      hold: g.hold,
       best: g.best || {},
     });
 
-    const result = { limit, f5_h2h: h2hLimited.map(compactMap), f5_totals: totalsLimited.map(compactMap) };
-
-    // 🔔 Send sharp alerts
-    [...h2hLimited, ...totalsLimited].forEach(g => {
-      if (isSharpSignal(g)) {
-        sendTelegramMessage(formatSharpAlert(g));
-      }
-    });
-
-    res.json(result);
+    res.json({ limit, f5_h2h: h2hLimited.map(compactMap), f5_totals: totalsLimited.map(compactMap) });
   } catch (err) {
     console.error("f5_scan error:", err);
     res.status(500).json({ error: String(err) });
@@ -147,6 +114,11 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
 /* -------------------- MLB Full Game Scan -------------------- */
 app.get("/api/mlb/game_scan", async (req, res) => {
   try {
+    if (!isWithinScanWindow()) {
+      console.log("⏸️ Full game scan skipped (outside window)");
+      return res.json({ message: "Outside scan window", limit: 0 });
+    }
+
     let limit = 5;
     if (String(req.query.telegram || "").toLowerCase() === "true") limit = 15;
     if (req.query.limit !== undefined) {
@@ -169,26 +141,16 @@ app.get("/api/mlb/game_scan", async (req, res) => {
       home: g.home,
       away: g.away,
       market: g.market,
-      hold: g.hold,
       best: g.best || {},
     });
 
-    const result = {
+    res.json({
       limit,
       game_h2h: h2hLimited.map(compactMap),
       game_totals: totalsLimited.map(compactMap),
       game_spreads: spreadsLimited.map(compactMap),
       game_team_totals: teamTotalsLimited.map(compactMap)
-    };
-
-    // 🔔 Send sharp alerts
-    [...h2hLimited, ...totalsLimited, ...spreadsLimited, ...teamTotalsLimited].forEach(g => {
-      if (isSharpSignal(g)) {
-        sendTelegramMessage(formatSharpAlert(g));
-      }
     });
-
-    res.json(result);
   } catch (err) {
     console.error("game_scan error:", err);
     res.status(500).json({ error: String(err) });
@@ -201,7 +163,7 @@ async function oddsHandler(req, res) {
     const sport = String(req.params.sport || "").toLowerCase();
     const market = String(req.params.market || "").toLowerCase();
 
-    const raw = String(req.query.raw || "").toLowerCase() === "true";
+    const raw = String(req.query.raw || "").toLowerCase() === "true"; // 🔑 Debug flag
 
     if (market.startsWith("prop_")) {
       const marketKey = market.replace("prop_", ""); 
@@ -218,6 +180,7 @@ async function oddsHandler(req, res) {
     const compact = String(req.query.compact || "").toLowerCase() === "true";
 
     let data = await FETCHERS[sport][market]({ minHold });
+
     if (raw) return res.json(data);
 
     if (!Array.isArray(data)) data = [];

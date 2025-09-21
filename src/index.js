@@ -68,25 +68,16 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
     let h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
     let totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
 
-    h2hLimited = h2hLimited.map((g) => ({
+    const compactMap = (g) => ({
       gameId: g.gameId,
       time: g.commence_time,
       home: g.home,
       away: g.away,
       market: g.market,
       best: g.best || {},
-    }));
+    });
 
-    totalsLimited = totalsLimited.map((g) => ({
-      gameId: g.gameId,
-      time: g.commence_time,
-      home: g.home,
-      away: g.away,
-      market: g.market,
-      best: g.best || {},
-    }));
-
-    res.json({ limit, f5_h2h: h2hLimited, f5_totals: totalsLimited });
+    res.json({ limit, f5_h2h: h2hLimited.map(compactMap), f5_totals: totalsLimited.map(compactMap) });
   } catch (err) {
     console.error("f5_scan error:", err);
     res.status(500).json({ error: String(err) });
@@ -104,29 +95,30 @@ app.get("/api/mlb/game_scan", async (req, res) => {
 
     const h2h = await FETCHERS.mlb.h2h({ minHold: null });
     const totals = await FETCHERS.mlb.totals({ minHold: null });
+    const spreads = await FETCHERS.mlb.spreads({ minHold: null });
+    const teamTotals = await FETCHERS.mlb.team_totals({ minHold: null });
 
     let h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
     let totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
+    let spreadsLimited = Array.isArray(spreads) ? spreads.slice(0, limit) : [];
+    let teamTotalsLimited = Array.isArray(teamTotals) ? teamTotals.slice(0, limit) : [];
 
-    h2hLimited = h2hLimited.map((g) => ({
+    const compactMap = (g) => ({
       gameId: g.gameId,
       time: g.commence_time,
       home: g.home,
       away: g.away,
       market: g.market,
       best: g.best || {},
-    }));
+    });
 
-    totalsLimited = totalsLimited.map((g) => ({
-      gameId: g.gameId,
-      time: g.commence_time,
-      home: g.home,
-      away: g.away,
-      market: g.market,
-      best: g.best || {},
-    }));
-
-    res.json({ limit, game_h2h: h2hLimited, game_totals: totalsLimited });
+    res.json({
+      limit,
+      game_h2h: h2hLimited.map(compactMap),
+      game_totals: totalsLimited.map(compactMap),
+      game_spreads: spreadsLimited.map(compactMap),
+      game_team_totals: teamTotalsLimited.map(compactMap)
+    });
   } catch (err) {
     console.error("game_scan error:", err);
     res.status(500).json({ error: String(err) });

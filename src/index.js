@@ -11,22 +11,10 @@ import {
   getNCAABH2HNormalized, getNCAABSpreadsNormalized, getNCAABTotalsNormalized,
   getTennisH2HNormalized,
   getSoccerH2HNormalized
-} from "./odds_service.js";
+} from "../odds_service.js";   // ✅ fixed path (was ./odds_service.js)
 
 const app = express();
 app.use(cors());
-
-/* -------------------- Request Logging -------------------- */
-app.use((req, res, next) => {
-  const start = Date.now();
-  res.on("finish", () => {
-    const ms = Date.now() - start;
-    console.log(
-      `[${new Date().toISOString()}] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${ms}ms)`
-    );
-  });
-  next();
-});
 
 /* -------------------- Health -------------------- */
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -45,7 +33,7 @@ const FETCHERS = {
 };
 
 // Generic handler for any sport + market
-async function oddsHandler(req, res, next) {
+async function oddsHandler(req, res) {
   try {
     const sport = String(req.params.sport || "").toLowerCase();
     const market = String(req.params.market || "").toLowerCase();
@@ -64,7 +52,7 @@ async function oddsHandler(req, res, next) {
 
     if (compact) {
       data = data.map((g) => {
-        const best = g.best || {};
+        const best  = g.best || {};
         return {
           gameId: g.gameId,
           time: g.commence_time,
@@ -79,21 +67,13 @@ async function oddsHandler(req, res, next) {
 
     res.json(data);
   } catch (err) {
-    next(err);
+    console.error("oddsHandler error:", err);
+    res.status(500).json({ error: String(err) });
   }
 }
 
 // Routes: /api/:sport/:market
 app.get("/api/:sport/:market", oddsHandler);
-
-/* -------------------- Global Error Handler -------------------- */
-app.use((err, req, res, _next) => {
-  console.error(
-    `[${new Date().toISOString()}] ERROR ${req.method} ${req.originalUrl}`,
-    err.stack || err.message
-  );
-  res.status(500).json({ error: "Internal Server Error" });
-});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));

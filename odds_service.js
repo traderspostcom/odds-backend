@@ -90,21 +90,21 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
       const m = (bk.markets || []).find((m) => m.key === marketKey);
       if (!m) continue;
 
-      if (marketKey === "h2h") {
+      if (marketKey.includes("h2h")) {
         const awayOutcome = m.outcomes.find((o) => o.name === away);
         const homeOutcome = m.outcomes.find((o) => o.name === home);
         if (awayOutcome) sideA = betterOf(sideA, { key, book: label, price: Number(awayOutcome.price) });
         if (homeOutcome) sideB = betterOf(sideB, { key, book: label, price: Number(homeOutcome.price) });
       }
 
-      if (marketKey === "spreads") {
+      if (marketKey.includes("spreads")) {
         for (const o of m.outcomes) {
           if (o.name === away) sideA = betterOf(sideA, { key, book: label, price: Number(o.price), point: o.point });
           if (o.name === home) sideB = betterOf(sideB, { key, book: label, price: Number(o.price), point: o.point });
         }
       }
 
-      if (marketKey === "totals") {
+      if (marketKey.includes("totals")) {
         for (const o of m.outcomes) {
           const side = o.name.toLowerCase();
           if (side === "over") sideA = betterOf(sideA, { key, book: label, price: Number(o.price), point: o.point });
@@ -127,9 +127,9 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
     const devigB = pB / sum;
 
     let best;
-    if (marketKey === "h2h") best = { home: sideB, away: sideA };
-    if (marketKey === "spreads") best = { FAV: sideB, DOG: sideA };
-    if (marketKey === "totals") best = { O: sideA, U: sideB };
+    if (marketKey.includes("h2h")) best = { home: sideB, away: sideA };
+    if (marketKey.includes("spreads")) best = { FAV: sideB, DOG: sideA };
+    if (marketKey.includes("totals")) best = { O: sideA, U: sideB };
 
     out.push({
       gameId: g.id,
@@ -138,9 +138,9 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
       away,
       market: marketKey,
       hold,
-      devig: marketKey === "h2h"
+      devig: marketKey.includes("h2h")
         ? { home: devigB, away: devigA }
-        : marketKey === "spreads"
+        : marketKey.includes("spreads")
           ? { FAV: devigB, DOG: devigA }
           : { O: devigA, U: devigB },
       best
@@ -178,6 +178,30 @@ export async function getMLBSpreadsNormalized(opts) {
 export async function getMLBTotalsNormalized(opts) {
   const games = await fetchOdds("baseball_mlb", "totals");
   return normalizeGames(games, "totals", opts);
+}
+
+// ✅ NEW: MLB First 5 Innings
+export async function getMLBF5Normalized(opts) {
+  const games = await fetchOdds("baseball_mlb", "h2h_1st_5_innings,totals_1st_5_innings");
+  return normalizeGames(games, "h2h_1st_5_innings", opts);
+}
+
+// ✅ NEW: MLB Team Totals
+export async function getMLBTeamTotalsNormalized(opts) {
+  const games = await fetchOdds("baseball_mlb", "team_totals");
+  return normalizeGames(games, "team_totals", opts);
+}
+
+// ✅ NEW: MLB Alt Lines
+export async function getMLBAltLinesNormalized(opts) {
+  const games = await fetchOdds("baseball_mlb", "alt_spreads,alt_totals");
+  return normalizeGames(games, "alt_spreads", opts); // normalization will handle both
+}
+
+// ✅ NEW: MLB Props
+export async function getMLBPropsNormalized(opts) {
+  const games = await fetchOdds("baseball_mlb", "pitcher_strikeouts,batter_home_runs,batter_total_bases");
+  return normalizeGames(games, "pitcher_strikeouts", opts); // starting point, can extend if needed
 }
 
 // NBA

@@ -6,43 +6,27 @@ const ODDS_API_KEY = process.env.ODDS_API_KEY;
 
 /* ================== Helpers ================== */
 
-// Convert American odds → implied probability
 function americanToProb(odds) {
   const o = Number(odds);
   if (!Number.isFinite(o)) return null;
   return o > 0 ? 100 / (o + 100) : (-o) / ((-o) + 100);
 }
 
-// Map provider keys → pretty names
 const BOOK_ALIASES = {
-  betmgm: "BetMGM",
-  caesars: "Caesars",
-  draftkings: "DraftKings",
-  fanduel: "FanDuel",
-  fanatics: "Fanatics",
-  espnbet: "ESPN BET",
-  betrivers: "BetRivers",
-  betonlineag: "BetOnline",
-  bovada: "Bovada",
-  mybookieag: "MyBookie.ag",
-  williamhill: "William Hill",
-  pinnacle: "Pinnacle",
-  betfair: "Betfair Exchange",
-  unibet: "Unibet",
+  betmgm: "BetMGM", caesars: "Caesars", draftkings: "DraftKings", fanduel: "FanDuel",
+  fanatics: "Fanatics", espnbet: "ESPN BET", betrivers: "BetRivers", betonlineag: "BetOnline",
+  bovada: "Bovada", mybookieag: "MyBookie.ag", williamhill: "William Hill",
+  pinnacle: "Pinnacle", betfair: "Betfair Exchange", unibet: "Unibet",
 };
 
 const ALLOWED_BOOKS = new Set(
-  (process.env.ALLOWED_BOOKS ||
-    Object.keys(BOOK_ALIASES).join(",")
-  ).split(",").map(s => s.trim().toLowerCase())
+  (process.env.ALLOWED_BOOKS || Object.keys(BOOK_ALIASES).join(","))
+    .split(",").map(s => s.trim().toLowerCase())
 );
 
-const BOOK_PRIORITY = [
-  "pinnacle","betfair","betmgm","caesars","draftkings","fanduel","fanatics",
-  "betrivers","betonlineag","bovada","mybookieag"
-];
+const BOOK_PRIORITY = ["pinnacle","betfair","betmgm","caesars","draftkings","fanduel","fanatics",
+  "betrivers","betonlineag","bovada","mybookieag"];
 
-// Pick better line (tie-breaker by priority)
 function betterOf(a, b) {
   if (!a) return b;
   if (!b) return a;
@@ -60,12 +44,10 @@ function prettyBookName(key, title) {
   return BOOK_ALIASES[k] || title || key || "Unknown";
 }
 
-/* ================== Fetchers ================== */
+/* ================== Fetcher ================== */
 
-// General-purpose fetcher
 async function fetchOdds(sportKey, marketKey) {
   if (!ODDS_API_KEY) throw new Error("Missing ODDS_API_KEY env var");
-
   const url =
     `${ODDS_API_BASE}/sports/${sportKey}/odds/?` +
     `apiKey=${encodeURIComponent(ODDS_API_KEY)}&regions=us&markets=${marketKey}&oddsFormat=american&dateFormat=iso`;
@@ -76,11 +58,6 @@ async function fetchOdds(sportKey, marketKey) {
     throw new Error(`Odds API ${resp.status} ${resp.statusText} – ${text}`);
   }
   return resp.json();
-}
-
-// Special raw fetcher for NFL H2H (used in /api/nfl/h2h/raw)
-export async function getNFLH2HRaw() {
-  return fetchOdds("americanfootball_nfl", "h2h");
 }
 
 /* ================== Normalizer ================== */
@@ -121,8 +98,8 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
       if (marketKey === "totals") {
         for (const o of m.outcomes) {
           const side = o.name.toLowerCase();
-          if (side === "over") bestA = betterOf(bestA, { key, book: label, price: Number(o.price), point: o.point });
-          if (side === "under") bestB = betterOf(bestB, { key, book: label, price: Number(o.price), point: o.point });
+          if (side === "over") bestA = betterOf(bestA, { key, book: label, price: Number(o.price), point: o.point, side: "O" });
+          if (side === "under") bestB = betterOf(bestB, { key, book: label, price: Number(o.price), point: o.point, side: "U" });
         }
       }
     }
@@ -147,8 +124,8 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
       away,
       market: marketKey,
       hold,
-      devig: { sideA: devigA, sideB: devigB },
-      best: { sideA: bestA, sideB: bestB }
+      devig: marketKey === "totals" ? { O: devigA, U: devigB } : { sideA: devigA, sideB: devigB },
+      best: marketKey === "totals" ? { O: bestA, U: bestB } : { sideA: bestA, sideB: bestB }
     });
   }
 
@@ -159,83 +136,33 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
 /* ================== Exports ================== */
 
 // NFL
-export async function getNFLH2HNormalized({ minHold } = {}) {
-  const games = await fetchOdds("americanfootball_nfl", "h2h");
-  return normalizeGames(games, "h2h", { minHold });
-}
-export async function getNFLSpreadsNormalized({ minHold } = {}) {
-  const games = await fetchOdds("americanfootball_nfl", "spreads");
-  return normalizeGames(games, "spreads", { minHold });
-}
-export async function getNFLTotalsNormalized({ minHold } = {}) {
-  const games = await fetchOdds("americanfootball_nfl", "totals");
-  return normalizeGames(games, "totals", { minHold });
-}
+export async function getNFLH2HNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("americanfootball_nfl", "h2h"), "h2h", { minHold }); }
+export async function getNFLSpreadsNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("americanfootball_nfl", "spreads"), "spreads", { minHold }); }
+export async function getNFLTotalsNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("americanfootball_nfl", "totals"), "totals", { minHold }); }
 
 // MLB
-export async function getMLBH2HNormalized({ minHold } = {}) {
-  const games = await fetchOdds("baseball_mlb", "h2h");
-  return normalizeGames(games, "h2h", { minHold });
-}
-export async function getMLBSpreadsNormalized({ minHold } = {}) {
-  const games = await fetchOdds("baseball_mlb", "spreads");
-  return normalizeGames(games, "spreads", { minHold });
-}
-export async function getMLBTotalsNormalized({ minHold } = {}) {
-  const games = await fetchOdds("baseball_mlb", "totals");
-  return normalizeGames(games, "totals", { minHold });
-}
+export async function getMLBH2HNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("baseball_mlb", "h2h"), "h2h", { minHold }); }
+export async function getMLBSpreadsNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("baseball_mlb", "spreads"), "spreads", { minHold }); }
+export async function getMLBTotalsNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("baseball_mlb", "totals"), "totals", { minHold }); }
 
 // NBA
-export async function getNBAH2HNormalized({ minHold } = {}) {
-  const games = await fetchOdds("basketball_nba", "h2h");
-  return normalizeGames(games, "h2h", { minHold });
-}
-export async function getNBASpreadsNormalized({ minHold } = {}) {
-  const games = await fetchOdds("basketball_nba", "spreads");
-  return normalizeGames(games, "spreads", { minHold });
-}
-export async function getNBATotalsNormalized({ minHold } = {}) {
-  const games = await fetchOdds("basketball_nba", "totals");
-  return normalizeGames(games, "totals", { minHold });
-}
+export async function getNBAH2HNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("basketball_nba", "h2h"), "h2h", { minHold }); }
+export async function getNBASpreadsNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("basketball_nba", "spreads"), "spreads", { minHold }); }
+export async function getNBATotalsNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("basketball_nba", "totals"), "totals", { minHold }); }
 
 // NCAAF
-export async function getNCAAFH2HNormalized({ minHold } = {}) {
-  const games = await fetchOdds("americanfootball_ncaaf", "h2h");
-  return normalizeGames(games, "h2h", { minHold });
-}
-export async function getNCAAFSpreadsNormalized({ minHold } = {}) {
-  const games = await fetchOdds("americanfootball_ncaaf", "spreads");
-  return normalizeGames(games, "spreads", { minHold });
-}
-export async function getNCAAFTotalsNormalized({ minHold } = {}) {
-  const games = await fetchOdds("americanfootball_ncaaf", "totals");
-  return normalizeGames(games, "totals", { minHold });
-}
+export async function getNCAAFH2HNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("americanfootball_ncaaf", "h2h"), "h2h", { minHold }); }
+export async function getNCAAFSpreadsNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("americanfootball_ncaaf", "spreads"), "spreads", { minHold }); }
+export async function getNCAAFTotalsNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("americanfootball_ncaaf", "totals"), "totals", { minHold }); }
 
 // NCAAB
-export async function getNCAABH2HNormalized({ minHold } = {}) {
-  const games = await fetchOdds("basketball_ncaab", "h2h");
-  return normalizeGames(games, "h2h", { minHold });
-}
-export async function getNCAABSpreadsNormalized({ minHold } = {}) {
-  const games = await fetchOdds("basketball_ncaab", "spreads");
-  return normalizeGames(games, "spreads", { minHold });
-}
-export async function getNCAABTotalsNormalized({ minHold } = {}) {
-  const games = await fetchOdds("basketball_ncaab", "totals");
-  return normalizeGames(games, "totals", { minHold });
-}
+export async function getNCAABH2HNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("basketball_ncaab", "h2h"), "h2h", { minHold }); }
+export async function getNCAABSpreadsNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("basketball_ncaab", "spreads"), "spreads", { minHold }); }
+export async function getNCAABTotalsNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("basketball_ncaab", "totals"), "totals", { minHold }); }
 
-// Tennis (ATP only for now)
-export async function getTennisH2HNormalized({ minHold } = {}) {
-  const games = await fetchOdds("tennis_atp", "h2h");
-  return normalizeGames(games, "h2h", { minHold });
-}
+// Tennis
+export async function getTennisH2HNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("tennis_atp", "h2h"), "h2h", { minHold }); }
 
-// Soccer (MLS only for now)
-export async function getSoccerH2HNormalized({ minHold } = {}) {
-  const games = await fetchOdds("soccer_usa_mls", "h2h");
-  return normalizeGames(games, "h2h", { minHold });
-}
+// Soccer
+export async function getSoccerH2HNormalized({ minHold } = {}) { return normalizeGames(await fetchOdds("soccer_usa_mls", "h2h"), "h2h", { minHold }); }
+

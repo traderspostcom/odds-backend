@@ -56,11 +56,13 @@ function prettyBookName(key, title) {
 }
 
 /* =============== Fetch Odds =============== */
-async function fetchOdds(sportKey, marketKey) {
+async function fetchOdds(sportKey, marketKey, advanced = false) {
   if (!ODDS_API_KEY) throw new Error("Missing ODDS_API_KEY env var");
 
+  const endpoint = advanced ? "odds-advanced" : "odds";
+
   const url =
-    `${ODDS_API_BASE}/sports/${sportKey}/odds/?` +
+    `${ODDS_API_BASE}/sports/${sportKey}/${endpoint}/?` +
     `apiKey=${encodeURIComponent(ODDS_API_KEY)}&regions=${REGIONS}&markets=${marketKey}&oddsFormat=american&dateFormat=iso`;
 
   try {
@@ -218,35 +220,31 @@ export async function getMLBTotalsNormalized(opts) {
   return normalizeGames(games, "totals", opts);
 }
 
-// ✅ F5 fixed
+// MLB First 5
 export async function getMLBF5H2HNormalized(opts) {
-  const games = await fetchOdds("baseball_mlb", "h2h_1st_5_innings");
+  const games = await fetchOdds("baseball_mlb", "h2h_1st_5_innings", true);
   return normalizeGames(games, "h2h_1st_5_innings", opts);
 }
 export async function getMLBF5TotalsNormalized(opts) {
-  const games = await fetchOdds("baseball_mlb", "totals_1st_5_innings");
+  const games = await fetchOdds("baseball_mlb", "totals_1st_5_innings", true);
   return normalizeGames(games, "totals_1st_5_innings", opts);
 }
-export async function getMLBF5Normalized(opts) {
-  const [h2h, totals] = await Promise.all([
-    getMLBF5H2HNormalized(opts),
-    getMLBF5TotalsNormalized(opts),
-  ]);
-  return { h2h, totals };
-}
 
+// MLB Team Totals
 export async function getMLBTeamTotalsNormalized(opts) {
-  const games = await fetchOdds("baseball_mlb", "team_totals");
+  const games = await fetchOdds("baseball_mlb", "team_totals", true);
   return normalizeGames(games, "team_totals", opts);
 }
+
+// MLB Alternate Lines
 export async function getMLBAltLinesNormalized(opts) {
-  const games = await fetchOdds("baseball_mlb", "alt_spreads,alt_totals");
+  const games = await fetchOdds("baseball_mlb", "alt_spreads,alt_totals", true);
   return normalizeGames(games, "alt_spreads", opts);
 }
 
 // Generic Props — works for ANY sport + ANY prop market
 export async function getPropsNormalized(sportKey, marketKey, opts) {
-  const games = await fetchOdds(sportKey, marketKey);
+  const games = await fetchOdds(sportKey, marketKey, true);
   return normalizeGames(games, marketKey, opts);
 }
 

@@ -24,10 +24,9 @@ import {
   // Tennis + Soccer
   getTennisH2HNormalized, getSoccerH2HNormalized,
 
-  // Generic props (any sport / any market)
+  // Generic props
   getPropsNormalized
-} from "../odds_service.js";   // ✅ odds_service.js in project root
-
+} from "../odds_service.js";   // ✅ odds_service.js is in project root
 
 const app = express();
 app.use(cors());
@@ -39,11 +38,11 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 const FETCHERS = {
   nfl:   { h2h: getNFLH2HNormalized, spreads: getNFLSpreadsNormalized, totals: getNFLTotalsNormalized },
   mlb:   { 
-    h2h: getMLBH2HNormalized, 
-    spreads: getMLBSpreadsNormalized, 
+    h2h: getMLBH2HNormalized,
+    spreads: getMLBSpreadsNormalized,
     totals: getMLBTotalsNormalized,
-    f5_h2h: getMLBF5H2HNormalized,       // ✅ First 5 ML only
-    f5_totals: getMLBF5TotalsNormalized, // ✅ First 5 Totals only
+    f5_h2h: getMLBF5H2HNormalized,       // ✅ First 5 Moneyline
+    f5_totals: getMLBF5TotalsNormalized, // ✅ First 5 Totals
     team_totals: getMLBTeamTotalsNormalized,
     alt: getMLBAltLinesNormalized
   },
@@ -76,12 +75,6 @@ async function oddsHandler(req, res) {
     const compact = String(req.query.compact || "").toLowerCase() === "true";
 
     let data = await FETCHERS[sport][market]({ minHold });
-
-    // Combined F5 returns { h2h, totals }
-    if (market === "f5") {
-      return res.json(data);
-    }
-
     if (!Array.isArray(data)) data = [];
     if (limit) data = data.slice(0, limit);
 

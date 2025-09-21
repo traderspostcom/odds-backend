@@ -1,5 +1,4 @@
 import "dotenv/config";
-import fetch from "node-fetch";
 
 // Replace with your actual bot token & chat ID
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "8283930472:AAFeSN3i8FA9n8H2_7MYOVBQroWJdmVtz7M";

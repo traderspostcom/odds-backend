@@ -243,7 +243,7 @@ export async function getMLBF5H2HNormalized(opts) {
   const results = [];
   for (const g of baseGames) {
     const eventMarkets = await fetchEventOdds(g.id, "h2h_1st_5_innings");
-    const normalized = normalizeGames(eventMarkets, "h2h_1st_5_innings", opts);
+    const normalized = normalizeGames(Array.isArray(eventMarkets) ? eventMarkets : [eventMarkets], "h2h_1st_5_innings", opts);
     results.push(...normalized);
   }
   return results;
@@ -255,7 +255,7 @@ export async function getMLBF5TotalsNormalized(opts) {
   const results = [];
   for (const g of baseGames) {
     const eventMarkets = await fetchEventOdds(g.id, "totals_1st_5_innings");
-    const normalized = normalizeGames(eventMarkets, "totals_1st_5_innings", opts);
+    const normalized = normalizeGames(Array.isArray(eventMarkets) ? eventMarkets : [eventMarkets], "totals_1st_5_innings", opts);
     results.push(...normalized);
   }
   return results;

@@ -56,15 +56,8 @@ const FETCHERS = {
 /* -------------------- MLB F5 Scan -------------------- */
 app.get("/api/mlb/f5_scan", async (req, res) => {
   try {
-    // default 5 games (safe for chat)
     let limit = 5;
-
-    // bump to 15 if telegram flag is passed
-    if (String(req.query.telegram || "").toLowerCase() === "true") {
-      limit = 15;
-    }
-
-    // allow manual override, max 15
+    if (String(req.query.telegram || "").toLowerCase() === "true") limit = 15;
     if (req.query.limit !== undefined) {
       limit = Math.min(15, Math.max(1, Number(req.query.limit)));
     }
@@ -75,7 +68,6 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
     let h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
     let totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
 
-    // compact response
     h2hLimited = h2hLimited.map((g) => ({
       gameId: g.gameId,
       time: g.commence_time,
@@ -94,13 +86,49 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
       best: g.best || {},
     }));
 
-    res.json({
-      limit,
-      f5_h2h: h2hLimited,
-      f5_totals: totalsLimited,
-    });
+    res.json({ limit, f5_h2h: h2hLimited, f5_totals: totalsLimited });
   } catch (err) {
     console.error("f5_scan error:", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+/* -------------------- MLB Full Game Scan -------------------- */
+app.get("/api/mlb/game_scan", async (req, res) => {
+  try {
+    let limit = 5;
+    if (String(req.query.telegram || "").toLowerCase() === "true") limit = 15;
+    if (req.query.limit !== undefined) {
+      limit = Math.min(15, Math.max(1, Number(req.query.limit)));
+    }
+
+    const h2h = await FETCHERS.mlb.h2h({ minHold: null });
+    const totals = await FETCHERS.mlb.totals({ minHold: null });
+
+    let h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
+    let totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
+
+    h2hLimited = h2hLimited.map((g) => ({
+      gameId: g.gameId,
+      time: g.commence_time,
+      home: g.home,
+      away: g.away,
+      market: g.market,
+      best: g.best || {},
+    }));
+
+    totalsLimited = totalsLimited.map((g) => ({
+      gameId: g.gameId,
+      time: g.commence_time,
+      home: g.home,
+      away: g.away,
+      market: g.market,
+      best: g.best || {},
+    }));
+
+    res.json({ limit, game_h2h: h2hLimited, game_totals: totalsLimited });
+  } catch (err) {
+    console.error("game_scan error:", err);
     res.status(500).json({ error: String(err) });
   }
 });
@@ -113,7 +141,6 @@ async function oddsHandler(req, res) {
 
     const raw = String(req.query.raw || "").toLowerCase() === "true"; // 🔑 Debug flag
 
-    // Dynamic props
     if (market.startsWith("prop_")) {
       const marketKey = market.replace("prop_", ""); 
       const data = await getPropsNormalized(sport, marketKey, {});
@@ -130,10 +157,7 @@ async function oddsHandler(req, res) {
 
     let data = await FETCHERS[sport][market]({ minHold });
 
-    // 🔎 Raw debug mode: skip compact/normalize slicing
-    if (raw) {
-      return res.json(data);
-    }
+    if (raw) return res.json(data);
 
     if (!Array.isArray(data)) data = [];
     if (limit) data = data.slice(0, limit);

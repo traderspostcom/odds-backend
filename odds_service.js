@@ -1,7 +1,6 @@
-// src/odds_service.js
+// odds_service.js
 const ODDS_API_BASE = process.env.ODDS_API_BASE || "https://api.the-odds-api.com/v4";
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
-const REGIONS = process.env.ODDS_REGIONS || "us,uk,eu"; // ✅ multi-region support
 
 /* =============== Helpers =============== */
 function americanToProb(odds) {
@@ -61,20 +60,14 @@ async function fetchOdds(sportKey, marketKey) {
 
   const url =
     `${ODDS_API_BASE}/sports/${sportKey}/odds/?` +
-    `apiKey=${encodeURIComponent(ODDS_API_KEY)}&regions=${REGIONS}&markets=${marketKey}&oddsFormat=american&dateFormat=iso`;
+    `apiKey=${encodeURIComponent(ODDS_API_KEY)}&regions=us,uk,eu&markets=${marketKey}&oddsFormat=american&dateFormat=iso`;
 
-  try {
-    const resp = await fetch(url);
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      console.error(`❌ Odds API failed: sport=${sportKey}, market=${marketKey}, status=${resp.status}, msg=${text}`);
-      return [];
-    }
-    return resp.json();
-  } catch (err) {
-    console.error(`❌ Fetch error: sport=${sportKey}, market=${marketKey}`, err);
-    return [];
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`Odds API ${resp.status} ${resp.statusText} – ${text}`);
   }
+  return resp.json();
 }
 
 /* =============== Normalizer =============== */
@@ -84,6 +77,7 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
   for (const g of games || []) {
     const home = g.home_team;
     const away = g.away_team || (g.teams ? g.teams.find((t) => t !== home) : null);
+    if (!home || !away) continue;
 
     let sideA = null;
     let sideB = null;
@@ -96,59 +90,27 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
       const m = (bk.markets || []).find((m) => m.key === marketKey);
       if (!m) continue;
 
-      /* ---------- Props ---------- */
-      if (
-        marketKey.includes("pitcher_") ||
-        marketKey.includes("batter_") ||
-        marketKey.includes("player_")
-      ) {
-        for (const o of m.outcomes) {
-          out.push({
-            gameId: g.id,
-            commence_time: g.commence_time,
-            home,
-            away,
-            market: marketKey,
-            player: o.name,
-            line: o.point ?? null,
-            price: Number(o.price),
-            book: label
-          });
-        }
-        continue; // skip hold/devig logic for props
-      }
-
-      /* ---------- Standard Markets ---------- */
-      if (marketKey.includes("h2h")) {
+      if (marketKey.startsWith("h2h")) {
         const awayOutcome = m.outcomes.find((o) => o.name === away);
         const homeOutcome = m.outcomes.find((o) => o.name === home);
         if (awayOutcome) sideA = betterOf(sideA, { key, book: label, price: Number(awayOutcome.price) });
         if (homeOutcome) sideB = betterOf(sideB, { key, book: label, price: Number(homeOutcome.price) });
       }
 
-      if (marketKey.includes("spreads")) {
+      if (marketKey === "spreads") {
         for (const o of m.outcomes) {
           if (o.name === away) sideA = betterOf(sideA, { key, book: label, price: Number(o.price), point: o.point });
           if (o.name === home) sideB = betterOf(sideB, { key, book: label, price: Number(o.price), point: o.point });
         }
       }
 
-      if (marketKey.includes("totals")) {
+      if (marketKey === "totals" || marketKey.includes("totals")) {
         for (const o of m.outcomes) {
           const side = o.name.toLowerCase();
           if (side === "over") sideA = betterOf(sideA, { key, book: label, price: Number(o.price), point: o.point });
           if (side === "under") sideB = betterOf(sideB, { key, book: label, price: Number(o.price), point: o.point });
         }
       }
-    }
-
-    // Skip props (already pushed)
-    if (
-      marketKey.includes("pitcher_") ||
-      marketKey.includes("batter_") ||
-      marketKey.includes("player_")
-    ) {
-      continue;
     }
 
     if (!sideA || !sideB) continue;
@@ -165,9 +127,9 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
     const devigB = pB / sum;
 
     let best;
-    if (marketKey.includes("h2h")) best = { home: sideB, away: sideA };
-    if (marketKey.includes("spreads")) best = { FAV: sideB, DOG: sideA };
-    if (marketKey.includes("totals")) best = { O: sideA, U: sideB };
+    if (marketKey.startsWith("h2h")) best = { home: sideB, away: sideA };
+    if (marketKey === "spreads") best = { FAV: sideB, DOG: sideA };
+    if (marketKey === "totals" || marketKey.includes("totals")) best = { O: sideA, U: sideB };
 
     out.push({
       gameId: g.id,
@@ -176,11 +138,7 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
       away,
       market: marketKey,
       hold,
-      devig: marketKey.includes("h2h")
-        ? { home: devigB, away: devigA }
-        : marketKey.includes("spreads")
-          ? { FAV: devigB, DOG: devigA }
-          : { O: devigA, U: devigB },
+      devig: best,
       best
     });
   }
@@ -217,23 +175,25 @@ export async function getMLBTotalsNormalized(opts) {
   const games = await fetchOdds("baseball_mlb", "totals");
   return normalizeGames(games, "totals", opts);
 }
+// MLB First 5 (Patched)
 export async function getMLBF5Normalized(opts) {
-  const games = await fetchOdds("baseball_mlb", "h2h_1st_5_innings,totals_1st_5_innings");
-  return normalizeGames(games, "h2h_1st_5_innings", opts);
-}
-export async function getMLBTeamTotalsNormalized(opts) {
-  const games = await fetchOdds("baseball_mlb", "team_totals");
-  return normalizeGames(games, "team_totals", opts);
-}
-export async function getMLBAltLinesNormalized(opts) {
-  const games = await fetchOdds("baseball_mlb", "alt_spreads,alt_totals");
-  return normalizeGames(games, "alt_spreads", opts);
-}
+  const keys = ["h2h_1st_5_innings", "h2h_1st_half"];
+  let allGames = [];
 
-// Generic Props — works for ANY sport + ANY prop market
-export async function getPropsNormalized(sportKey, marketKey, opts) {
-  const games = await fetchOdds(sportKey, marketKey);
-  return normalizeGames(games, marketKey, opts);
+  for (const k of keys) {
+    try {
+      const games = await fetchOdds("baseball_mlb", k);
+      if (Array.isArray(games) && games.length) {
+        const normalized = normalizeGames(games, k, opts);
+        allGames = allGames.concat(normalized);
+      }
+    } catch (err) {
+      console.error(`⚠️ Error fetching MLB F5 for key=${k}:`, err.message);
+    }
+  }
+
+  allGames.sort((a, b) => (a.hold ?? 0) - (b.hold ?? 0));
+  return allGames;
 }
 
 // NBA

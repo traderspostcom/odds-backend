@@ -176,6 +176,32 @@ async function oddsHandler(req, res) {
   }
 }
 
+import { sendTelegramMessage, formatSharpAlert } from "../telegram.js"; // top of file
+
+// 🔔 Test route
+app.get("/test-telegram", async (_req, res) => {
+  try {
+    const fakeGame = {
+      time: "Jan 19 • 8:00 PM ET",
+      home: "Boston Celtics",
+      away: "Detroit Pistons",
+      market: "f5_h2h",
+      best: {
+        home: { book: "DraftKings", price: -192 },
+        away: { book: "DraftKings", price: 160 }
+      }
+    };
+
+    const message = formatSharpAlert(fakeGame, "ML");
+    await sendTelegramMessage(message);
+
+    res.json({ ok: true, sent: message });
+  } catch (err) {
+    console.error("Telegram test error:", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 /* -------------------- Routes -------------------- */
 app.get("/api/:sport/:market", oddsHandler);
 

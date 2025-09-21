@@ -11,10 +11,22 @@ import {
   getNCAABH2HNormalized, getNCAABSpreadsNormalized, getNCAABTotalsNormalized,
   getTennisH2HNormalized,
   getSoccerH2HNormalized
-} from "../odds_service.js";   // ✅ fixed path (one level up)
+} from "./odds_service.js";
 
 const app = express();
 app.use(cors());
+
+/* -------------------- Request Logging -------------------- */
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    const ms = Date.now() - start;
+    console.log(
+      `[${new Date().toISOString()}] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${ms}ms)`
+    );
+  });
+  next();
+});
 
 /* -------------------- Health -------------------- */
 app.get("/health", (_req, res) => res.json({ ok: true }));
@@ -33,7 +45,7 @@ const FETCHERS = {
 };
 
 // Generic handler for any sport + market
-async function oddsHandler(req, res) {
+async function oddsHandler(req, res, next) {
   try {
     const sport = String(req.params.sport || "").toLowerCase();
     const market = String(req.params.market || "").toLowerCase();
@@ -43,7 +55,7 @@ async function oddsHandler(req, res) {
     }
 
     const minHold = req.query.minHold !== undefined ? Number(req.query.minHold) : null;
-    const limit   = req.query.limit !== undefined ? Math.max(1, Number(req.query.limit)) : 10; // ✅ default = 10
+    const limit   = req.query.limit   !== undefined ? Math.max(1, Number(req.query.limit)) : 10; // default 10
     const compact = String(req.query.compact || "").toLowerCase() === "true";
 
     let data = await FETCHERS[sport][market]({ minHold });
@@ -67,13 +79,21 @@ async function oddsHandler(req, res) {
 
     res.json(data);
   } catch (err) {
-    console.error("oddsHandler error:", err);
-    res.status(500).json({ error: String(err) });
+    next(err);
   }
 }
 
 // Routes: /api/:sport/:market
 app.get("/api/:sport/:market", oddsHandler);
+
+/* -------------------- Global Error Handler -------------------- */
+app.use((err, req, res, _next) => {
+  console.error(
+    `[${new Date().toISOString()}] ERROR ${req.method} ${req.originalUrl}`,
+    err.stack || err.message
+  );
+  res.status(500).json({ error: "Internal Server Error" });
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));

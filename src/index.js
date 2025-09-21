@@ -31,9 +31,6 @@ import {
 const app = express();
 app.use(cors());
 
-/* -------------------- Health -------------------- */
-app.get("/health", (_req, res) => res.json({ ok: true }));
-
 /* -------------------- Scan Window Helper -------------------- */
 function isWithinScanWindow() {
   const tz = "America/New_York"; // ET
@@ -212,4 +209,7 @@ async function oddsHandler(req, res) {
 app.get("/api/:sport/:market", oddsHandler);
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`⏱️ Scan window set to ${process.env.SCAN_START_HOUR || "12"} → ${process.env.SCAN_STOP_HOUR || "1"} ET`);
+});

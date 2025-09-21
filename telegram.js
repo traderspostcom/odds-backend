@@ -3,7 +3,7 @@ import fetch from "node-fetch";
 
 // Replace with your actual bot token & chat ID
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "8283930472:AAFeSN3i8FA9n8H2_7MYOVBQroWJdmVtz7M";
-const CHAT_ID = process.env.TELEGRAM_CHAT_ID || "<YOUR_CHAT_ID>"; // you get this from getUpdates
+const CHAT_ID = process.env.TELEGRAM_CHAT_ID || "5459632524"; // you get this from getUpdates
 const API_BASE = "https://odds-backend-oo4k.onrender.com/api/mlb";
 
 // Helper to send a message

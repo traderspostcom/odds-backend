@@ -9,7 +9,7 @@ import {
 
   // MLB
   getMLBH2HNormalized, getMLBSpreadsNormalized, getMLBTotalsNormalized,
-  getMLBF5Normalized, getMLBF5H2HNormalized, getMLBF5TotalsNormalized,
+  getMLBF5H2HNormalized, getMLBF5TotalsNormalized,
   getMLBTeamTotalsNormalized, getMLBAltLinesNormalized,
 
   // NBA

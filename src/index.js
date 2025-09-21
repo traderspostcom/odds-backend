@@ -28,6 +28,8 @@ import {
   getPropsNormalized
 } from "../odds_service.js";   // ✅ odds_service.js is in root
 
+import { sendTelegramMessage } from "../telegram.js";  // ✅ Telegram helper
+
 const app = express();
 app.use(cors());
 
@@ -83,9 +85,9 @@ function resetCountersIfNewDay() {
 function canUseCredits(needed) {
   const limit = parseInt(process.env.MONTHLY_CREDIT_LIMIT || "19000");
   if (monthlyCredits + needed > limit) {
-    console.warn(
-      `🚨 Credit safeguard triggered! Monthly cap of ${limit} would be exceeded (currently ${monthlyCredits}, need +${needed}). Skipping scan.`
-    );
+    const msg = `🚨 Credit safeguard triggered!\nLimit=${limit}, Current=${monthlyCredits}, Need=+${needed}\n⚠️ Scans paused.`;
+    console.warn(msg);
+    sendTelegramMessage(msg);   // 🔔 send Telegram alert
     return false;
   }
   return true;

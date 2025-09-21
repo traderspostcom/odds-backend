@@ -23,10 +23,10 @@ import {
   // Tennis + Soccer
   getTennisH2HNormalized, getSoccerH2HNormalized,
 
-  // Generic props (any sport / market)
+  // Generic props (any sport / any market)
   getPropsNormalized
-} from "./odds_service.js";   // ✅ SAME FOLDER
-  
+} from "../odds_service.js";   // ✅ correct since odds_service.js is in root
+
 
 const app = express();
 app.use(cors());
@@ -37,8 +37,15 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 /* -------------------- Multi-Sport Router -------------------- */
 const FETCHERS = {
   nfl:   { h2h: getNFLH2HNormalized, spreads: getNFLSpreadsNormalized, totals: getNFLTotalsNormalized },
-  mlb:   { h2h: getMLBH2HNormalized, spreads: getMLBSpreadsNormalized, totals: getMLBTotalsNormalized,
-           f5: getMLBF5Normalized, team_totals: getMLBTeamTotalsNormalized, alt: getMLBAltLinesNormalized },
+  mlb:   { 
+    h2h: getMLBH2HNormalized, 
+    spreads: getMLBSpreadsNormalized, 
+    totals: getMLBTotalsNormalized,
+    f5: getMLBF5Normalized,                  // ✅ First 5
+    team_totals: getMLBTeamTotalsNormalized, // ✅ Team Totals
+    alt: getMLBAltLinesNormalized            // ✅ Alt Lines
+    // props handled dynamically below
+  },
   nba:   { h2h: getNBAH2HNormalized, spreads: getNBASpreadsNormalized, totals: getNBATotalsNormalized },
   ncaaf: { h2h: getNCAAFH2HNormalized, spreads: getNCAAFSpreadsNormalized, totals: getNCAAFTotalsNormalized },
   ncaab: { h2h: getNCAABH2HNormalized, spreads: getNCAABSpreadsNormalized, totals: getNCAABTotalsNormalized },
@@ -52,9 +59,9 @@ async function oddsHandler(req, res) {
     const sport = String(req.params.sport || "").toLowerCase();
     const market = String(req.params.market || "").toLowerCase();
 
-    // Special case: props
+    // 🔑 Dynamic props (ex: /api/mlb/prop_pitcher_strikeouts)
     if (market.startsWith("prop_")) {
-      const marketKey = market.replace("prop_", ""); // e.g. prop_pitcher_strikeouts
+      const marketKey = market.replace("prop_", ""); 
       const data = await getPropsNormalized(sport, marketKey, {});
       return res.json(data);
     }

@@ -175,9 +175,14 @@ export async function getMLBTotalsNormalized(opts) {
   const games = await fetchOdds("baseball_mlb", "totals");
   return normalizeGames(games, "totals", opts);
 }
-// MLB First 5 (Patched for both keys)
+// MLB First 5 — patched with all aliases
 export async function getMLBF5Normalized(opts) {
-  const keys = ["h2h_1st_5_innings", "h2h_1st_half"];
+  const keys = [
+    "h2h_1st_5_innings",
+    "h2h_1st_half",
+    "1st_half",
+    "first_5_innings"
+  ];
   let allGames = [];
 
   for (const k of keys) {

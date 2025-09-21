@@ -4,154 +4,76 @@ import express from "express";
 import cors from "cors";
 
 import {
-  // NFL (you already had these)
-  getNFLH2HRaw,
-  getNFLH2HNormalized,
-  // Multi-sport helpers (make sure these are exported in ../odds_service.js)
-  getMLBH2HNormalized,
-  getNBAH2HNormalized,
-  getNCAAFH2HNormalized,
-  getNCAABH2HNormalized,
+  getNFLH2HNormalized, getNFLSpreadsNormalized, getNFLTotalsNormalized,
+  getMLBH2HNormalized, getMLBSpreadsNormalized, getMLBTotalsNormalized,
+  getNBAH2HNormalized, getNBASpreadsNormalized, getNBATotalsNormalized,
+  getNCAAFH2HNormalized, getNCAAFSpreadsNormalized, getNCAAFTotalsNormalized,
+  getNCAABH2HNormalized, getNCAABSpreadsNormalized, getNCAABTotalsNormalized,
   getTennisH2HNormalized,
   getSoccerH2HNormalized
-} from "../odds_service.js";   // ✅ changed from "./odds_service.js"
+} from "./odds_service.js";
 
 const app = express();
 app.use(cors());
 
-// Tiny request logger
-app.use((req, _res, next) => {
-  console.log(req.method, req.url);
-  next();
-});
-
 /* -------------------- Health -------------------- */
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-/* -------------------- NFL: Raw (debug) -------------------- */
-app.get("/api/nfl/h2h/raw", async (_req, res) => {
-  try {
-    const data = await getNFLH2HRaw();
-    res.json(data);
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
-});
+/* -------------------- Multi-Sport Router -------------------- */
 
-/* -------------------- NFL: Normalized -------------------- */
-app.get("/api/nfl/h2h", async (req, res) => {
-  try {
-    const minHold = req.query.minHold !== undefined ? Number(req.query.minHold) : null;
-    const limit   = req.query.limit   !== undefined ? Math.max(1, Number(req.query.limit)) : null;
-    const compact = String(req.query.compact || "").toLowerCase() === "true";
-
-    const data = await getNFLH2HNormalized({ minHold });
-    let out = Array.isArray(data) ? data : [];
-    if (limit) out = out.slice(0, limit);
-
-    if (compact) {
-      out = out.map((g) => {
-        const best = g.best || {};
-        const teamNames = Object.keys(best);
-        const teamA = teamNames[0];
-        const teamB = teamNames[1];
-        return {
-          gameId: g.gameId,
-          time: g.commence_time,
-          home: g.home,
-          away: g.away,
-          hold: typeof g.hold === "number" ? Number(g.hold.toFixed(4)) : null,
-          devig: {
-            [teamA]: g.devig?.[teamA] != null ? Number(Number(g.devig[teamA]).toFixed(4)) : null,
-            [teamB]: g.devig?.[teamB] != null ? Number(Number(g.devig[teamB]).toFixed(4)) : null
-          },
-          best: {
-            [teamA]: best[teamA] ? { book: best[teamA].book, price: best[teamA].price } : null,
-            [teamB]: best[teamB] ? { book: best[teamB].book, price: best[teamB].price } : null
-          }
-        };
-      });
-    }
-
-    res.json(out);
-  } catch (e) {
-    res.status(500).json({ error: String(e) });
-  }
-});
-
-/* -------------------- Universal Multi-Sport H2H -------------------- */
-const ALLOWED_SPORTS = new Set(["nfl", "mlb", "nba", "ncaaf", "ncaab", "tennis", "soccer"]);
-
+// Supported sports + their fetchers
 const FETCHERS = {
-  nfl:   async ({ minHold }) => getNFLH2HNormalized({ minHold }),
-  mlb:   async ({ minHold }) => getMLBH2HNormalized({ minHold }),
-  nba:   async ({ minHold }) => getNBAH2HNormalized({ minHold }),
-  ncaaf: async ({ minHold }) => getNCAAFH2HNormalized({ minHold }),
-  ncaab: async ({ minHold }) => getNCAABH2HNormalized({ minHold }),
-  tennis:async ({ minHold }) => getTennisH2HNormalized({ minHold }),
-  soccer:async ({ minHold }) => getSoccerH2HNormalized({ minHold })
+  nfl:   { h2h: getNFLH2HNormalized, spreads: getNFLSpreadsNormalized, totals: getNFLTotalsNormalized },
+  mlb:   { h2h: getMLBH2HNormalized, spreads: getMLBSpreadsNormalized, totals: getMLBTotalsNormalized },
+  nba:   { h2h: getNBAH2HNormalized, spreads: getNBASpreadsNormalized, totals: getNBATotalsNormalized },
+  ncaaf: { h2h: getNCAAFH2HNormalized, spreads: getNCAAFSpreadsNormalized, totals: getNCAAFTotalsNormalized },
+  ncaab: { h2h: getNCAABH2HNormalized, spreads: getNCAABSpreadsNormalized, totals: getNCAABTotalsNormalized },
+  tennis:{ h2h: getTennisH2HNormalized },
+  soccer:{ h2h: getSoccerH2HNormalized }
 };
 
-// Shared handler
-async function h2hHandler(req, res) {
+// Generic handler for any sport + market
+async function oddsHandler(req, res) {
   try {
     const sport = String(req.params.sport || "").toLowerCase();
-    if (!ALLOWED_SPORTS.has(sport)) {
-      return res.status(400).json({ error: "unsupported_sport", sport });
+    const market = String(req.params.market || "").toLowerCase();
+
+    if (!FETCHERS[sport] || !FETCHERS[sport][market]) {
+      return res.status(400).json({ error: "unsupported", sport, market });
     }
 
     const minHold = req.query.minHold !== undefined ? Number(req.query.minHold) : null;
     const limit   = req.query.limit   !== undefined ? Math.max(1, Number(req.query.limit)) : null;
     const compact = String(req.query.compact || "").toLowerCase() === "true";
 
-    const fetcher = FETCHERS[sport];
-    let data = await fetcher({ minHold });
+    let data = await FETCHERS[sport][market]({ minHold });
     if (!Array.isArray(data)) data = [];
     if (limit) data = data.slice(0, limit);
 
     if (compact) {
       data = data.map((g) => {
-        const best  = g.best || g.best_prices || {};
-        const devig = g.devig || {};
-        const teamNames = Object.keys(best);
-        const teamA = teamNames[0] || g.away || "Away";
-        const teamB = teamNames[1] || g.home || "Home";
-        const holdVal = typeof g.hold === "number" ? g.hold : (g.evidence?.hold ?? null);
-
+        const best  = g.best || {};
         return {
-          gameId: g.gameId || g.event_id || null,
-          time: g.commence_time || g.start_time || null,
+          gameId: g.gameId,
+          time: g.commence_time,
           home: g.home,
           away: g.away,
-          hold: holdVal != null ? Number(Number(holdVal).toFixed(4)) : null,
-          devig: {
-            [teamA]: devig[teamA] != null ? Number(Number(devig[teamA]).toFixed(4)) : null,
-            [teamB]: devig[teamB] != null ? Number(Number(devig[teamB]).toFixed(4)) : null
-          },
-          best: {
-            [teamA]: best[teamA] ? { book: best[teamA].book, price: best[teamA].price } : null,
-            [teamB]: best[teamB] ? { book: best[teamB].book, price: best[teamB].price } : null
-          }
+          market: g.market,
+          hold: typeof g.hold === "number" ? Number(g.hold.toFixed(4)) : null,
+          best
         };
       });
     }
 
     res.json(data);
-  } catch (e) {
-    console.error("multi-sport h2h error:", e);
-    res.status(500).json({ error: String(e) });
+  } catch (err) {
+    console.error("oddsHandler error:", err);
+    res.status(500).json({ error: String(err) });
   }
 }
 
-// Routes
-app.get("/api/:sport/h2h", h2hHandler);
-["mlb", "nba", "ncaaf", "ncaab", "tennis", "soccer"].forEach((sport) => {
-  app.get(`/api/${sport}/h2h`, (req, res) => {
-    req.params.sport = sport;
-    return h2hHandler(req, res);
-  });
-});
-/* ------------- End Universal Multi-Sport H2H ------------- */
+// Routes: /api/:sport/:market
+app.get("/api/:sport/:market", oddsHandler);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));

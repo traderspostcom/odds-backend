@@ -26,7 +26,7 @@ import {
 
   // Generic props
   getPropsNormalized
-} from "../odds_service.js";   // ✅ odds_service.js is in project root
+} from "../odds_service.js";   // ✅ odds_service.js is in root
 
 const app = express();
 app.use(cors());
@@ -38,11 +38,11 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 const FETCHERS = {
   nfl:   { h2h: getNFLH2HNormalized, spreads: getNFLSpreadsNormalized, totals: getNFLTotalsNormalized },
   mlb:   { 
-    h2h: getMLBH2HNormalized,
-    spreads: getMLBSpreadsNormalized,
+    h2h: getMLBH2HNormalized, 
+    spreads: getMLBSpreadsNormalized, 
     totals: getMLBTotalsNormalized,
-    f5_h2h: getMLBF5H2HNormalized,       // ✅ First 5 Moneyline
-    f5_totals: getMLBF5TotalsNormalized, // ✅ First 5 Totals
+    f5_h2h: getMLBF5H2HNormalized,        // ✅ First 5 Moneyline
+    f5_totals: getMLBF5TotalsNormalized,  // ✅ First 5 Totals
     team_totals: getMLBTeamTotalsNormalized,
     alt: getMLBAltLinesNormalized
   },
@@ -53,13 +53,15 @@ const FETCHERS = {
   soccer:{ h2h: getSoccerH2HNormalized }
 };
 
-// Generic handler
+/* -------------------- Odds Handler -------------------- */
 async function oddsHandler(req, res) {
   try {
     const sport = String(req.params.sport || "").toLowerCase();
     const market = String(req.params.market || "").toLowerCase();
 
-    // 🔑 Dynamic props (ex: /api/mlb/prop_pitcher_strikeouts)
+    const raw = String(req.query.raw || "").toLowerCase() === "true"; // 🔑 Debug flag
+
+    // Dynamic props
     if (market.startsWith("prop_")) {
       const marketKey = market.replace("prop_", ""); 
       const data = await getPropsNormalized(sport, marketKey, {});
@@ -75,6 +77,12 @@ async function oddsHandler(req, res) {
     const compact = String(req.query.compact || "").toLowerCase() === "true";
 
     let data = await FETCHERS[sport][market]({ minHold });
+
+    // 🔎 Raw debug mode: skip compact/normalize slicing
+    if (raw) {
+      return res.json(data);
+    }
+
     if (!Array.isArray(data)) data = [];
     if (limit) data = data.slice(0, limit);
 
@@ -100,7 +108,7 @@ async function oddsHandler(req, res) {
   }
 }
 
-// Routes
+/* -------------------- Routes -------------------- */
 app.get("/api/:sport/:market", oddsHandler);
 
 const PORT = process.env.PORT || 3000;

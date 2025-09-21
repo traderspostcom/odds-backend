@@ -217,10 +217,24 @@ export async function getMLBTotalsNormalized(opts) {
   const games = await fetchOdds("baseball_mlb", "totals");
   return normalizeGames(games, "totals", opts);
 }
-export async function getMLBF5Normalized(opts) {
-  const games = await fetchOdds("baseball_mlb", "h2h_1st_5_innings,totals_1st_5_innings");
+
+// ✅ F5 fixed
+export async function getMLBF5H2HNormalized(opts) {
+  const games = await fetchOdds("baseball_mlb", "h2h_1st_5_innings");
   return normalizeGames(games, "h2h_1st_5_innings", opts);
 }
+export async function getMLBF5TotalsNormalized(opts) {
+  const games = await fetchOdds("baseball_mlb", "totals_1st_5_innings");
+  return normalizeGames(games, "totals_1st_5_innings", opts);
+}
+export async function getMLBF5Normalized(opts) {
+  const [h2h, totals] = await Promise.all([
+    getMLBF5H2HNormalized(opts),
+    getMLBF5TotalsNormalized(opts),
+  ]);
+  return { h2h, totals };
+}
+
 export async function getMLBTeamTotalsNormalized(opts) {
   const games = await fetchOdds("baseball_mlb", "team_totals");
   return normalizeGames(games, "team_totals", opts);

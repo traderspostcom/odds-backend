@@ -97,14 +97,14 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
         if (homeOutcome) sideB = betterOf(sideB, { key, book: label, price: Number(homeOutcome.price) });
       }
 
-      if (marketKey === "spreads") {
+      if (marketKey.includes("spreads")) {
         for (const o of m.outcomes) {
           if (o.name === away) sideA = betterOf(sideA, { key, book: label, price: Number(o.price), point: o.point });
           if (o.name === home) sideB = betterOf(sideB, { key, book: label, price: Number(o.price), point: o.point });
         }
       }
 
-      if (marketKey === "totals" || marketKey.includes("totals")) {
+      if (marketKey.includes("totals")) {
         for (const o of m.outcomes) {
           const side = o.name.toLowerCase();
           if (side === "over") sideA = betterOf(sideA, { key, book: label, price: Number(o.price), point: o.point });
@@ -128,8 +128,8 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
 
     let best;
     if (marketKey.startsWith("h2h")) best = { home: sideB, away: sideA };
-    if (marketKey === "spreads") best = { FAV: sideB, DOG: sideA };
-    if (marketKey === "totals" || marketKey.includes("totals")) best = { O: sideA, U: sideB };
+    if (marketKey.includes("spreads")) best = { FAV: sideB, DOG: sideA };
+    if (marketKey.includes("totals")) best = { O: sideA, U: sideB };
 
     out.push({
       gameId: g.id,
@@ -175,7 +175,7 @@ export async function getMLBTotalsNormalized(opts) {
   const games = await fetchOdds("baseball_mlb", "totals");
   return normalizeGames(games, "totals", opts);
 }
-// MLB First 5 (Patched)
+// MLB First 5 (Patched for both keys)
 export async function getMLBF5Normalized(opts) {
   const keys = ["h2h_1st_5_innings", "h2h_1st_half"];
   let allGames = [];
@@ -194,6 +194,21 @@ export async function getMLBF5Normalized(opts) {
 
   allGames.sort((a, b) => (a.hold ?? 0) - (b.hold ?? 0));
   return allGames;
+}
+// MLB F5 Totals
+export async function getMLBF5TotalsNormalized(opts) {
+  const games = await fetchOdds("baseball_mlb", "totals_1st_5_innings");
+  return normalizeGames(games, "totals_1st_5_innings", opts);
+}
+// MLB Team Totals
+export async function getMLBTeamTotalsNormalized(opts) {
+  const games = await fetchOdds("baseball_mlb", "team_totals");
+  return normalizeGames(games, "team_totals", opts);
+}
+// MLB Alt Lines
+export async function getMLBAltLinesNormalized(opts) {
+  const games = await fetchOdds("baseball_mlb", "alt_spreads");
+  return normalizeGames(games, "alt_spreads", opts);
 }
 
 // NBA
@@ -248,4 +263,10 @@ export async function getTennisH2HNormalized(opts) {
 export async function getSoccerH2HNormalized(opts) {
   const games = await fetchOdds("soccer_usa_mls", "h2h");
   return normalizeGames(games, "h2h", opts);
+}
+
+// Generic Props
+export async function getPropsNormalized(sportKey, marketKey, opts) {
+  const games = await fetchOdds(sportKey, marketKey);
+  return normalizeGames(games, marketKey, opts);
 }

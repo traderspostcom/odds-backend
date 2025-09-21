@@ -60,9 +60,9 @@ function prettyBookName(key, title) {
   return BOOK_ALIASES[k] || title || key || "Unknown";
 }
 
-/* ================== Fetcher ================== */
+/* ================== Fetchers ================== */
 
-// Fetch odds for any sport + market
+// General-purpose fetcher
 async function fetchOdds(sportKey, marketKey) {
   if (!ODDS_API_KEY) throw new Error("Missing ODDS_API_KEY env var");
 
@@ -76,6 +76,11 @@ async function fetchOdds(sportKey, marketKey) {
     throw new Error(`Odds API ${resp.status} ${resp.statusText} – ${text}`);
   }
   return resp.json();
+}
+
+// Special raw fetcher for NFL H2H (used in /api/nfl/h2h/raw)
+export async function getNFLH2HRaw() {
+  return fetchOdds("americanfootball_nfl", "h2h");
 }
 
 /* ================== Normalizer ================== */

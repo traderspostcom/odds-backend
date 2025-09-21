@@ -56,13 +56,11 @@ function prettyBookName(key, title) {
 }
 
 /* =============== Fetch Odds =============== */
-async function fetchOdds(sportKey, marketKey, advanced = false) {
+async function fetchOdds(sportKey, marketKey) {
   if (!ODDS_API_KEY) throw new Error("Missing ODDS_API_KEY env var");
 
-  const endpoint = advanced ? "odds-advanced" : "odds";
-
   const url =
-    `${ODDS_API_BASE}/sports/${sportKey}/${endpoint}/?` +
+    `${ODDS_API_BASE}/sports/${sportKey}/odds/?` +
     `apiKey=${encodeURIComponent(ODDS_API_KEY)}&regions=${REGIONS}&markets=${marketKey}&oddsFormat=american&dateFormat=iso`;
 
   try {
@@ -75,6 +73,25 @@ async function fetchOdds(sportKey, marketKey, advanced = false) {
     return resp.json();
   } catch (err) {
     console.error(`❌ Fetch error: sport=${sportKey}, market=${marketKey}`, err);
+    return [];
+  }
+}
+
+// 🔑 Fetch odds for a single event (used for F5 markets)
+async function fetchEventOdds(eventId, marketKeys) {
+  const url =
+    `${ODDS_API_BASE}/sports/baseball_mlb/events/${eventId}/odds/?` +
+    `apiKey=${encodeURIComponent(ODDS_API_KEY)}&regions=${REGIONS}&markets=${marketKeys}&oddsFormat=american&dateFormat=iso`;
+
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      console.error(`❌ Event odds failed: event=${eventId}, markets=${marketKeys}, status=${resp.status}`);
+      return [];
+    }
+    return resp.json();
+  } catch (err) {
+    console.error(`❌ Fetch error (event odds):`, err);
     return [];
   }
 }
@@ -220,31 +237,45 @@ export async function getMLBTotalsNormalized(opts) {
   return normalizeGames(games, "totals", opts);
 }
 
-// MLB First 5
+// MLB First 5 H2H
 export async function getMLBF5H2HNormalized(opts) {
-  const games = await fetchOdds("baseball_mlb", "h2h_1st_5_innings", true);
-  return normalizeGames(games, "h2h_1st_5_innings", opts);
+  const baseGames = await fetchOdds("baseball_mlb", "h2h");
+  const results = [];
+  for (const g of baseGames) {
+    const eventMarkets = await fetchEventOdds(g.id, "h2h_1st_5_innings");
+    const normalized = normalizeGames(eventMarkets, "h2h_1st_5_innings", opts);
+    results.push(...normalized);
+  }
+  return results;
 }
+
+// MLB First 5 Totals
 export async function getMLBF5TotalsNormalized(opts) {
-  const games = await fetchOdds("baseball_mlb", "totals_1st_5_innings", true);
-  return normalizeGames(games, "totals_1st_5_innings", opts);
+  const baseGames = await fetchOdds("baseball_mlb", "totals");
+  const results = [];
+  for (const g of baseGames) {
+    const eventMarkets = await fetchEventOdds(g.id, "totals_1st_5_innings");
+    const normalized = normalizeGames(eventMarkets, "totals_1st_5_innings", opts);
+    results.push(...normalized);
+  }
+  return results;
 }
 
 // MLB Team Totals
 export async function getMLBTeamTotalsNormalized(opts) {
-  const games = await fetchOdds("baseball_mlb", "team_totals", true);
+  const games = await fetchOdds("baseball_mlb", "team_totals");
   return normalizeGames(games, "team_totals", opts);
 }
 
 // MLB Alternate Lines
 export async function getMLBAltLinesNormalized(opts) {
-  const games = await fetchOdds("baseball_mlb", "alt_spreads,alt_totals", true);
-  return normalizeGames(games, "alt_spreads", opts);
+  const games = await fetchOdds("baseball_mlb", "alternate_spreads,alternate_totals");
+  return normalizeGames(games, "alternate_spreads", opts);
 }
 
 // Generic Props — works for ANY sport + ANY prop market
 export async function getPropsNormalized(sportKey, marketKey, opts) {
-  const games = await fetchOdds(sportKey, marketKey, true);
+  const games = await fetchOdds(sportKey, marketKey);
   return normalizeGames(games, marketKey, opts);
 }
 

@@ -42,7 +42,6 @@ const FETCHERS = {
     h2h: getMLBH2HNormalized, 
     spreads: getMLBSpreadsNormalized, 
     totals: getMLBTotalsNormalized,
-    f5: getMLBF5Normalized,              // ✅ Combined First 5
     f5_h2h: getMLBF5H2HNormalized,       // ✅ First 5 ML only
     f5_totals: getMLBF5TotalsNormalized, // ✅ First 5 Totals only
     team_totals: getMLBTeamTotalsNormalized,

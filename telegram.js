@@ -41,4 +41,51 @@ async function pushUpdates() {
 }
 
 pushUpdates().catch(err => console.error("Telegram push failed:", err));
+// telegram.js
+import fetch from "node-fetch";
+
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+// -------------------- Formatter --------------------
+export function formatSharpAlert(g) {
+  let header = `📊 ${g.away} @ ${g.home}\n${new Date(g.time).toLocaleString("en-US", { timeZone: "America/New_York" })}`;
+
+  let lines = [];
+
+  if (g.market.includes("h2h") && g.best) {
+    lines.push(`ML  ${g.away} ${g.best.away?.price || ""} ${g.best.away?.book || ""}`);
+    lines.push(`    ${g.home} ${g.best.home?.price || ""} ${g.best.home?.book || ""}`);
+  }
+
+  if (g.market.includes("spreads") && g.best) {
+    lines.push(`SP  ${g.away} ${g.best.DOG?.point || ""} ${g.best.DOG?.price || ""} ${g.best.DOG?.book || ""}`);
+    lines.push(`    ${g.home} ${g.best.FAV?.point || ""} ${g.best.FAV?.price || ""} ${g.best.FAV?.book || ""}`);
+  }
+
+  if (g.market.includes("totals") && g.best) {
+    lines.push(`TOT O${g.best.O?.point || ""} ${g.best.O?.price || ""} ${g.best.O?.book || ""}`);
+    lines.push(`    U${g.best.U?.point || ""} ${g.best.U?.price || ""} ${g.best.U?.book || ""}`);
+  }
+
+  return `\`\`\`\n${header}\n\n${lines.join("\n")}\n\`\`\``;
+}
+
+// -------------------- Telegram Sender --------------------
+export async function sendTelegramMessage(message) {
+  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: CHAT_ID,
+      text: message,
+      parse_mode: "MarkdownV2"
+    }),
+  });
+
+  if (!res.ok) {
+    console.error("❌ Telegram error:", await res.text());
+  }
+}
 

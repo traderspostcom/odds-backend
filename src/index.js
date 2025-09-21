@@ -30,80 +30,54 @@ const FETCHERS = {
   soccer:{ h2h: getSoccerH2HNormalized }
 };
 
-// ---- Formatter for consistent structure ----
-function formatBest(g, market) {
-  const best = g.best || {};
-  let formattedBest = {};
+// Aliases for flexibility
+const MARKET_ALIASES = {
+  moneyline: "h2h",
+  ml: "h2h",
+  spread: "spreads",
+  line: "spreads",
+  overunder: "totals",
+  ou: "totals",
+  totals: "totals"
+};
 
-  if (market === "h2h") {
-    formattedBest = {
-      home: best[g.home] ? { book: best[g.home].book, price: best[g.home].price } : null,
-      away: best[g.away] ? { book: best[g.away].book, price: best[g.away].price } : null
-    };
-  }
-
-  if (market === "spreads") {
-    const sides = Object.values(best).filter(Boolean);
-    const favorite = sides.sort((a, b) => (a.point ?? 0) - (b.point ?? 0))[0];
-    const underdog = sides.find(s => s !== favorite);
-
-    formattedBest = {
-      FAV: favorite ? { book: favorite.book, price: favorite.price, point: favorite.point } : null,
-      DOG: underdog ? { book: underdog.book, price: underdog.price, point: underdog.point } : null
-    };
-  }
-
-  if (market === "totals") {
-    formattedBest = {
-      O: best["sideA"] && best["sideA"].point !== undefined
-        ? { book: best["sideA"].book, price: best["sideA"].price, point: best["sideA"].point }
-        : null,
-      U: best["sideB"] && best["sideB"].point !== undefined
-        ? { book: best["sideB"].book, price: best["sideB"].price, point: best["sideB"].point }
-        : null
-    };
-  }
-
-  return formattedBest;
-}
-
-// ---- Odds Handler ----
 async function oddsHandler(req, res) {
   try {
     const sport = String(req.params.sport || "").toLowerCase();
-    const market = String(req.params.market || "").toLowerCase();
+    let market = String(req.params.market || "").toLowerCase();
+
+    // Apply aliases
+    if (MARKET_ALIASES[market]) {
+      market = MARKET_ALIASES[market];
+    }
 
     if (!FETCHERS[sport] || !FETCHERS[sport][market]) {
       return res.status(400).json({ error: "unsupported", sport, market });
     }
 
     const minHold = req.query.minHold !== undefined ? Number(req.query.minHold) : null;
-    let limit = req.query.limit !== undefined ? Math.max(1, Number(req.query.limit)) : null;
-    if (!limit) limit = 10; // ✅ Default to 10
-
+    const limit   = req.query.limit !== undefined
+      ? Math.max(1, Number(req.query.limit))
+      : 10; // ✅ default = 10
     const compact = String(req.query.compact || "").toLowerCase() === "true";
 
     let data = await FETCHERS[sport][market]({ minHold });
     if (!Array.isArray(data)) data = [];
-    if (limit) data = data.slice(0, limit);
 
-    data = data.map((g) => {
-      const base = {
+    // Always enforce limit (default or query param)
+    data = data.slice(0, limit);
+
+    if (compact) {
+      data = data.map((g) => ({
         gameId: g.gameId,
         time: g.commence_time,
         home: g.home,
         away: g.away,
         market: g.market,
         hold: typeof g.hold === "number" ? Number(g.hold.toFixed(4)) : null,
-        best: formatBest(g, market)
-      };
-
-      if (!compact) {
-        base.devig = g.devig || {};
-      }
-
-      return base;
-    });
+        best: g.best
+      }));
+    }
 
     res.json(data);
   } catch (err) {
@@ -112,6 +86,7 @@ async function oddsHandler(req, res) {
   }
 }
 
+// Routes: /api/:sport/:market
 app.get("/api/:sport/:market", oddsHandler);
 
 const PORT = process.env.PORT || 3000;

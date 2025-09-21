@@ -53,6 +53,31 @@ function isWithinScanWindow() {
   return true; // start == stop → always on
 }
 
+/* -------------------- Daily Counter -------------------- */
+let f5ScanCount = 0;
+let gameScanCount = 0;
+let creditCount = 0;
+let lastDateET = null;
+
+function resetCountersIfNewDay() {
+  const tz = "America/New_York";
+  const now = new Date();
+  const today = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(now);
+
+  if (today !== lastDateET) {
+    lastDateET = today;
+    f5ScanCount = 0;
+    gameScanCount = 0;
+    creditCount = 0;
+    console.log(`📅 New ET day: counters reset (${today})`);
+  }
+}
+
 /* -------------------- Multi-Sport Router -------------------- */
 const FETCHERS = {
   nfl:   { h2h: getNFLH2HNormalized, spreads: getNFLSpreadsNormalized, totals: getNFLTotalsNormalized },
@@ -75,6 +100,8 @@ const FETCHERS = {
 /* -------------------- MLB F5 Scan -------------------- */
 app.get("/api/mlb/f5_scan", async (req, res) => {
   try {
+    resetCountersIfNewDay();
+
     if (!isWithinScanWindow()) {
       console.log("⏸️ F5 scan skipped (outside window)");
       return res.json({ message: "Outside scan window", limit: 0 });
@@ -92,7 +119,9 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
     let h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
     let totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
 
-    console.log(`✅ F5 scan executed — ${h2hLimited.length} H2H, ${totalsLimited.length} Totals (limit=${limit})`);
+    f5ScanCount++;
+    creditCount += 2; // ✅ each F5 scan = 2 API calls
+    console.log(`✅ F5 scan #${f5ScanCount} today → +2 credits (total=${creditCount})`);
 
     const compactMap = (g) => ({
       gameId: g.gameId,
@@ -103,7 +132,7 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
       best: g.best || {},
     });
 
-    res.json({ limit, f5_h2h: h2hLimited.map(compactMap), f5_totals: totalsLimited.map(compactMap) });
+    res.json({ limit, f5_h2h: h2hLimited.map(compactMap), f5_totals: totalsLimited.map(compactMap), credits_used_today: creditCount });
   } catch (err) {
     console.error("f5_scan error:", err);
     res.status(500).json({ error: String(err) });
@@ -113,6 +142,8 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
 /* -------------------- MLB Full Game Scan -------------------- */
 app.get("/api/mlb/game_scan", async (req, res) => {
   try {
+    resetCountersIfNewDay();
+
     if (!isWithinScanWindow()) {
       console.log("⏸️ Full game scan skipped (outside window)");
       return res.json({ message: "Outside scan window", limit: 0 });
@@ -134,7 +165,9 @@ app.get("/api/mlb/game_scan", async (req, res) => {
     let spreadsLimited = Array.isArray(spreads) ? spreads.slice(0, limit) : [];
     let teamTotalsLimited = Array.isArray(teamTotals) ? teamTotals.slice(0, limit) : [];
 
-    console.log(`✅ Full game scan executed — ${h2hLimited.length} H2H, ${totalsLimited.length} Totals, ${spreadsLimited.length} Spreads, ${teamTotalsLimited.length} Team Totals (limit=${limit})`);
+    gameScanCount++;
+    creditCount += 4; // ✅ each full scan = 4 API calls
+    console.log(`✅ Full game scan #${gameScanCount} today → +4 credits (total=${creditCount})`);
 
     const compactMap = (g) => ({
       gameId: g.gameId,
@@ -150,7 +183,8 @@ app.get("/api/mlb/game_scan", async (req, res) => {
       game_h2h: h2hLimited.map(compactMap),
       game_totals: totalsLimited.map(compactMap),
       game_spreads: spreadsLimited.map(compactMap),
-      game_team_totals: teamTotalsLimited.map(compactMap)
+      game_team_totals: teamTotalsLimited.map(compactMap),
+      credits_used_today: creditCount
     });
   } catch (err) {
     console.error("game_scan error:", err);

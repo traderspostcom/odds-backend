@@ -92,6 +92,8 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
     let h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
     let totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
 
+    console.log(`✅ F5 scan executed — ${h2hLimited.length} H2H, ${totalsLimited.length} Totals (limit=${limit})`);
+
     const compactMap = (g) => ({
       gameId: g.gameId,
       time: g.commence_time,
@@ -131,6 +133,8 @@ app.get("/api/mlb/game_scan", async (req, res) => {
     let totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
     let spreadsLimited = Array.isArray(spreads) ? spreads.slice(0, limit) : [];
     let teamTotalsLimited = Array.isArray(teamTotals) ? teamTotals.slice(0, limit) : [];
+
+    console.log(`✅ Full game scan executed — ${h2hLimited.length} H2H, ${totalsLimited.length} Totals, ${spreadsLimited.length} Spreads, ${teamTotalsLimited.length} Team Totals (limit=${limit})`);
 
     const compactMap = (g) => ({
       gameId: g.gameId,

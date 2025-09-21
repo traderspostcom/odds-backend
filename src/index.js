@@ -6,13 +6,14 @@ import cors from "cors";
 import {
   getNFLH2HNormalized, getNFLSpreadsNormalized, getNFLTotalsNormalized,
   getMLBH2HNormalized, getMLBSpreadsNormalized, getMLBTotalsNormalized,
-  getMLBF5Normalized, getMLBTeamTotalsNormalized, getMLBAltLinesNormalized, getMLBPropsNormalized,
+  getMLBF5Normalized, getMLBTeamTotalsNormalized, getMLBAltLinesNormalized,
   getNBAH2HNormalized, getNBASpreadsNormalized, getNBATotalsNormalized,
   getNCAAFH2HNormalized, getNCAAFSpreadsNormalized, getNCAAFTotalsNormalized,
   getNCAABH2HNormalized, getNCAABSpreadsNormalized, getNCAABTotalsNormalized,
   getTennisH2HNormalized,
-  getSoccerH2HNormalized
-} from "../odds_service.js";   // ✅ fixed path (was ./odds_service.js)
+  getSoccerH2HNormalized,
+  getPropsNormalized   // ✅ new generic props
+} from "../odds_service.js";
 
 const app = express();
 app.use(cors());
@@ -29,10 +30,9 @@ const FETCHERS = {
     h2h: getMLBH2HNormalized, 
     spreads: getMLBSpreadsNormalized, 
     totals: getMLBTotalsNormalized,
-    f5: getMLBF5Normalized,                  // ✅ First 5 ML + Totals
-    teamtotals: getMLBTeamTotalsNormalized,  // ✅ Team Totals
-    altlines: getMLBAltLinesNormalized,      // ✅ Alt Spreads & Totals
-    props: getMLBPropsNormalized             // ✅ Ks, HRs, TB Props
+    f5: getMLBF5Normalized,                  
+    teamtotals: getMLBTeamTotalsNormalized,  
+    altlines: getMLBAltLinesNormalized       
   },
   nba:   { h2h: getNBAH2HNormalized, spreads: getNBASpreadsNormalized, totals: getNBATotalsNormalized },
   ncaaf: { h2h: getNCAAFH2HNormalized, spreads: getNCAAFSpreadsNormalized, totals: getNCAAFTotalsNormalized },
@@ -47,20 +47,39 @@ async function oddsHandler(req, res) {
     const sport = String(req.params.sport || "").toLowerCase();
     const market = String(req.params.market || "").toLowerCase();
 
-    if (!FETCHERS[sport] || !FETCHERS[sport][market]) {
-      return res.status(400).json({ error: "unsupported", sport, market });
-    }
-
     const minHold = req.query.minHold !== undefined ? Number(req.query.minHold) : null;
     const limit   = req.query.limit   !== undefined ? Math.max(1, Number(req.query.limit)) : 10; // default 10
     const compact = String(req.query.compact || "").toLowerCase() === "true";
 
-    let data = await FETCHERS[sport][market]({ minHold });
+    let data = [];
+
+    if (FETCHERS[sport] && FETCHERS[sport][market]) {
+      // ✅ Standard markets (h2h, spreads, totals, f5, etc.)
+      data = await FETCHERS[sport][market]({ minHold });
+    } else {
+      // ✅ Fallback to props (generic handler)
+      data = await getPropsNormalized(sport, market, { minHold });
+    }
+
     if (!Array.isArray(data)) data = [];
     if (limit) data = data.slice(0, limit);
 
     if (compact) {
       data = data.map((g) => {
+        // Props have a different shape
+        if (g.player) {
+          return {
+            gameId: g.gameId,
+            time: g.commence_time,
+            player: g.player,
+            market: g.market,
+            line: g.line,
+            price: g.price,
+            book: g.book
+          };
+        }
+
+        // Standard markets
         const best  = g.best || {};
         return {
           gameId: g.gameId,

@@ -53,6 +53,58 @@ const FETCHERS = {
   soccer:{ h2h: getSoccerH2HNormalized }
 };
 
+/* -------------------- MLB F5 Scan -------------------- */
+app.get("/api/mlb/f5_scan", async (req, res) => {
+  try {
+    // default 5 games (safe for chat)
+    let limit = 5;
+
+    // bump to 15 if telegram flag is passed
+    if (String(req.query.telegram || "").toLowerCase() === "true") {
+      limit = 15;
+    }
+
+    // allow manual override, max 15
+    if (req.query.limit !== undefined) {
+      limit = Math.min(15, Math.max(1, Number(req.query.limit)));
+    }
+
+    const h2h = await FETCHERS.mlb.f5_h2h({ minHold: null });
+    const totals = await FETCHERS.mlb.f5_totals({ minHold: null });
+
+    let h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
+    let totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
+
+    // compact response
+    h2hLimited = h2hLimited.map((g) => ({
+      gameId: g.gameId,
+      time: g.commence_time,
+      home: g.home,
+      away: g.away,
+      market: g.market,
+      best: g.best || {},
+    }));
+
+    totalsLimited = totalsLimited.map((g) => ({
+      gameId: g.gameId,
+      time: g.commence_time,
+      home: g.home,
+      away: g.away,
+      market: g.market,
+      best: g.best || {},
+    }));
+
+    res.json({
+      limit,
+      f5_h2h: h2hLimited,
+      f5_totals: totalsLimited,
+    });
+  } catch (err) {
+    console.error("f5_scan error:", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 /* -------------------- Odds Handler -------------------- */
 async function oddsHandler(req, res) {
   try {

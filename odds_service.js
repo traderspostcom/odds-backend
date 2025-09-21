@@ -1,6 +1,7 @@
 // src/odds_service.js
 const ODDS_API_BASE = process.env.ODDS_API_BASE || "https://api.the-odds-api.com/v4";
 const ODDS_API_KEY = process.env.ODDS_API_KEY;
+const REGIONS = process.env.ODDS_REGIONS || "us,uk,eu"; // ✅ multi-region support
 
 /* =============== Helpers =============== */
 function americanToProb(odds) {
@@ -60,14 +61,20 @@ async function fetchOdds(sportKey, marketKey) {
 
   const url =
     `${ODDS_API_BASE}/sports/${sportKey}/odds/?` +
-    `apiKey=${encodeURIComponent(ODDS_API_KEY)}&regions=us&markets=${marketKey}&oddsFormat=american&dateFormat=iso`;
+    `apiKey=${encodeURIComponent(ODDS_API_KEY)}&regions=${REGIONS}&markets=${marketKey}&oddsFormat=american&dateFormat=iso`;
 
-  const resp = await fetch(url);
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => "");
-    throw new Error(`Odds API ${resp.status} ${resp.statusText} – ${text}`);
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      console.error(`❌ Odds API failed: sport=${sportKey}, market=${marketKey}, status=${resp.status}, msg=${text}`);
+      return [];
+    }
+    return resp.json();
+  } catch (err) {
+    console.error(`❌ Fetch error: sport=${sportKey}, market=${marketKey}`, err);
+    return [];
   }
-  return resp.json();
 }
 
 /* =============== Normalizer =============== */
@@ -77,7 +84,6 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
   for (const g of games || []) {
     const home = g.home_team;
     const away = g.away_team || (g.teams ? g.teams.find((t) => t !== home) : null);
-    if (!home || !away) continue;
 
     let sideA = null;
     let sideB = null;
@@ -90,6 +96,29 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
       const m = (bk.markets || []).find((m) => m.key === marketKey);
       if (!m) continue;
 
+      /* ---------- Props ---------- */
+      if (
+        marketKey.includes("pitcher_") ||
+        marketKey.includes("batter_") ||
+        marketKey.includes("player_")
+      ) {
+        for (const o of m.outcomes) {
+          out.push({
+            gameId: g.id,
+            commence_time: g.commence_time,
+            home,
+            away,
+            market: marketKey,
+            player: o.name,
+            line: o.point ?? null,
+            price: Number(o.price),
+            book: label
+          });
+        }
+        continue; // skip hold/devig logic for props
+      }
+
+      /* ---------- Standard Markets ---------- */
       if (marketKey.includes("h2h")) {
         const awayOutcome = m.outcomes.find((o) => o.name === away);
         const homeOutcome = m.outcomes.find((o) => o.name === home);
@@ -111,6 +140,15 @@ function normalizeGames(games, marketKey, { minHold } = {}) {
           if (side === "under") sideB = betterOf(sideB, { key, book: label, price: Number(o.price), point: o.point });
         }
       }
+    }
+
+    // Skip props (already pushed)
+    if (
+      marketKey.includes("pitcher_") ||
+      marketKey.includes("batter_") ||
+      marketKey.includes("player_")
+    ) {
+      continue;
     }
 
     if (!sideA || !sideB) continue;
@@ -179,29 +217,23 @@ export async function getMLBTotalsNormalized(opts) {
   const games = await fetchOdds("baseball_mlb", "totals");
   return normalizeGames(games, "totals", opts);
 }
-
-// ✅ NEW: MLB First 5 Innings
 export async function getMLBF5Normalized(opts) {
   const games = await fetchOdds("baseball_mlb", "h2h_1st_5_innings,totals_1st_5_innings");
   return normalizeGames(games, "h2h_1st_5_innings", opts);
 }
-
-// ✅ NEW: MLB Team Totals
 export async function getMLBTeamTotalsNormalized(opts) {
   const games = await fetchOdds("baseball_mlb", "team_totals");
   return normalizeGames(games, "team_totals", opts);
 }
-
-// ✅ NEW: MLB Alt Lines
 export async function getMLBAltLinesNormalized(opts) {
   const games = await fetchOdds("baseball_mlb", "alt_spreads,alt_totals");
-  return normalizeGames(games, "alt_spreads", opts); // normalization will handle both
+  return normalizeGames(games, "alt_spreads", opts);
 }
 
-// ✅ NEW: MLB Props
-export async function getMLBPropsNormalized(opts) {
-  const games = await fetchOdds("baseball_mlb", "pitcher_strikeouts,batter_home_runs,batter_total_bases");
-  return normalizeGames(games, "pitcher_strikeouts", opts); // starting point, can extend if needed
+// Generic Props — works for ANY sport + ANY prop market
+export async function getPropsNormalized(sportKey, marketKey, opts) {
+  const games = await fetchOdds(sportKey, marketKey);
+  return normalizeGames(games, marketKey, opts);
 }
 
 // NBA

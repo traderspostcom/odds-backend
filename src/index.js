@@ -2,40 +2,50 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
 
 import {
   // NFL
-  getNFLH2HNormalized, getNFLSpreadsNormalized, getNFLTotalsNormalized,
+  getNFLH2HNormalized, getNFLTotalsNormalized,
+  getNFLF5H2HNormalized, getNFLF5TotalsNormalized,
 
   // MLB
-  getMLBH2HNormalized, getMLBSpreadsNormalized, getMLBTotalsNormalized,
+  getMLBH2HNormalized, getMLBTotalsNormalized,
   getMLBF5H2HNormalized, getMLBF5TotalsNormalized,
-  getMLBTeamTotalsNormalized, getMLBAltLinesNormalized,
 
   // NBA
-  getNBAH2HNormalized, getNBASpreadsNormalized, getNBATotalsNormalized,
+  getNBAH2HNormalized, getNBATotalsNormalized,
+  getNBAF5H2HNormalized, getNBAF5TotalsNormalized,
 
   // NCAAF
-  getNCAAFH2HNormalized, getNCAAFSpreadsNormalized, getNCAAFTotalsNormalized,
+  getNCAAFH2HNormalized, getNCAAFTotalsNormalized,
+  getNCAAFF5H2HNormalized, getNCAAFF5TotalsNormalized,
 
   // NCAAB
-  getNCAABH2HNormalized, getNCAABSpreadsNormalized, getNCAABTotalsNormalized,
+  getNCAABH2HNormalized, getNCAABTotalsNormalized,
 
   // Tennis + Soccer
   getTennisH2HNormalized, getSoccerH2HNormalized,
 
   // Generic props
   getPropsNormalized
-} from "../odds_service.js";   // ✅ odds_service.js is in root
+} from "../odds_service.js";
 
-import { sendTelegramMessage } from "../telegram.js";  // ✅ Telegram helper
+import { sendTelegramMessage } from "../telegram.js";
+
+// -------------------- Paths --------------------
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const CREDITS_FILE = path.join(__dirname, "../credits.json");
 
 const app = express();
 app.use(cors());
 
-/* -------------------- Scan Window Helper -------------------- */
+// -------------------- Helpers --------------------
 function isWithinScanWindow() {
-  const tz = "America/New_York"; // ET
+  const tz = "America/New_York";
   const now = new Date();
   const hour = parseInt(new Intl.DateTimeFormat("en-US", {
     timeZone: tz,
@@ -43,24 +53,33 @@ function isWithinScanWindow() {
     hour12: false
   }).format(now));
 
-  const start = parseInt(process.env.SCAN_START_HOUR || "12"); // default 12:00
-  const stop  = parseInt(process.env.SCAN_STOP_HOUR || "1");   // default 01:00
+  const start = parseInt(process.env.SCAN_START_HOUR || "12");
+  const stop = parseInt(process.env.SCAN_STOP_HOUR || "1");
 
-  if (start < stop) {
-    return hour >= start && hour < stop;
-  }
-  if (start > stop) {
-    return hour >= start || hour < stop;
-  }
-  return true; // start == stop → always on
+  if (start < stop) return hour >= start && hour < stop;
+  if (start > stop) return hour >= start || hour < stop;
+  return true;
 }
 
-/* -------------------- Daily + Monthly Counter -------------------- */
-let f5ScanCount = 0;
-let gameScanCount = 0;
-let creditCount = 0;
-let monthlyCredits = 0;
-let lastDateET = null;
+// -------------------- Credits --------------------
+let credits = { daily: 0, monthly: 0, lastDateET: null };
+
+function loadCredits() {
+  try {
+    if (fs.existsSync(CREDITS_FILE)) {
+      credits = JSON.parse(fs.readFileSync(CREDITS_FILE, "utf8"));
+    }
+  } catch (err) {
+    console.error("⚠️ Failed to load credits.json", err);
+  }
+}
+function saveCredits() {
+  try {
+    fs.writeFileSync(CREDITS_FILE, JSON.stringify(credits, null, 2));
+  } catch (err) {
+    console.error("⚠️ Failed to save credits.json", err);
+  }
+}
 
 function resetCountersIfNewDay() {
   const tz = "America/New_York";
@@ -72,172 +91,113 @@ function resetCountersIfNewDay() {
     day: "2-digit"
   }).format(now);
 
-  if (today !== lastDateET) {
-    lastDateET = today;
-    f5ScanCount = 0;
-    gameScanCount = 0;
-    creditCount = 0;
+  if (today !== credits.lastDateET) {
+    // Send summary before reset
+    if (credits.daily > 0) {
+      sendTelegramMessage(
+        `📊 End of Day Summary:\nDaily credits used: ${credits.daily}\nMonthly total: ${credits.monthly}`
+      );
+    }
+    credits.lastDateET = today;
+    credits.daily = 0;
+    saveCredits();
     console.log(`📅 New ET day: counters reset (${today})`);
   }
 }
 
-/* -------------------- Monthly Credit Safeguard -------------------- */
 function canUseCredits(needed) {
   const limit = parseInt(process.env.MONTHLY_CREDIT_LIMIT || "19000");
-  if (monthlyCredits + needed > limit) {
-    const msg = `🚨 Credit safeguard triggered!\nLimit=${limit}, Current=${monthlyCredits}, Need=+${needed}\n⚠️ Scans paused.`;
+  if (credits.monthly + needed > limit) {
+    const msg = `🚨 Credit safeguard triggered!\nLimit=${limit}, Current=${credits.monthly}, Need=+${needed}\n⚠️ Scans paused.`;
     console.warn(msg);
-    sendTelegramMessage(msg);   // 🔔 send Telegram alert
+    sendTelegramMessage(msg);
     return false;
   }
   return true;
 }
 
-/* -------------------- Multi-Sport Router -------------------- */
+function addCredits(n) {
+  credits.daily += n;
+  credits.monthly += n;
+  saveCredits();
+}
+
+// -------------------- Multi-Sport Router --------------------
 const FETCHERS = {
-  nfl:   { h2h: getNFLH2HNormalized, spreads: getNFLSpreadsNormalized, totals: getNFLTotalsNormalized },
-  mlb:   { 
-    h2h: getMLBH2HNormalized, 
-    spreads: getMLBSpreadsNormalized, 
-    totals: getMLBTotalsNormalized,
-    f5_h2h: getMLBF5H2HNormalized,        // ✅ First 5 Moneyline
-    f5_totals: getMLBF5TotalsNormalized,  // ✅ First 5 Totals
-    team_totals: getMLBTeamTotalsNormalized,
-    alt: getMLBAltLinesNormalized
-  },
-  nba:   { h2h: getNBAH2HNormalized, spreads: getNBASpreadsNormalized, totals: getNBATotalsNormalized },
-  ncaaf: { h2h: getNCAAFH2HNormalized, spreads: getNCAAFSpreadsNormalized, totals: getNCAAFTotalsNormalized },
-  ncaab: { h2h: getNCAABH2HNormalized, spreads: getNCAABSpreadsNormalized, totals: getNCAABTotalsNormalized },
+  nfl:   { h2h: getNFLH2HNormalized, totals: getNFLTotalsNormalized, f5_h2h: getNFLF5H2HNormalized, f5_totals: getNFLF5TotalsNormalized },
+  mlb:   { h2h: getMLBH2HNormalized, totals: getMLBTotalsNormalized, f5_h2h: getMLBF5H2HNormalized, f5_totals: getMLBF5TotalsNormalized },
+  nba:   { h2h: getNBAH2HNormalized, totals: getNBATotalsNormalized, f5_h2h: getNBAF5H2HNormalized, f5_totals: getNBAF5TotalsNormalized },
+  ncaaf: { h2h: getNCAAFH2HNormalized, totals: getNCAAFTotalsNormalized, f5_h2h: getNCAAFF5H2HNormalized, f5_totals: getNCAAFF5TotalsNormalized },
+  ncaab: { h2h: getNCAABH2HNormalized, totals: getNCAABTotalsNormalized },
   tennis:{ h2h: getTennisH2HNormalized },
   soccer:{ h2h: getSoccerH2HNormalized }
 };
 
-/* -------------------- MLB F5 Scan -------------------- */
-app.get("/api/mlb/f5_scan", async (req, res) => {
-  try {
-    resetCountersIfNewDay();
+// -------------------- Scan Endpoints --------------------
+function makeScanRoute(sport, type, creditCost, fetchers) {
+  app.get(`/api/${sport}/${type}_scan`, async (req, res) => {
+    try {
+      resetCountersIfNewDay();
+      if (!isWithinScanWindow()) return res.json({ message: "Outside scan window" });
+      if (!canUseCredits(creditCost)) return res.json({ message: "Monthly credit limit reached" });
 
-    if (!isWithinScanWindow()) {
-      console.log("⏸️ F5 scan skipped (outside window)");
-      return res.json({ message: "Outside scan window", limit: 0 });
+      let limit = String(req.query.telegram || "").toLowerCase() === "true" ? 15 : 5;
+      if (req.query.limit !== undefined) limit = Math.min(15, Math.max(1, Number(req.query.limit)));
+
+      const h2h = await fetchers.h2h({ minHold: null });
+      const totals = await fetchers.totals({ minHold: null });
+      const f5h2h = fetchers.f5_h2h ? await fetchers.f5_h2h({ minHold: null }) : [];
+      const f5totals = fetchers.f5_totals ? await fetchers.f5_totals({ minHold: null }) : [];
+
+      addCredits(creditCost);
+      console.log(`✅ ${sport.toUpperCase()} ${type} scan → +${creditCost} credits (daily=${credits.daily}, monthly=${credits.monthly})`);
+
+      const compactMap = (g) => ({
+        gameId: g.gameId,
+        time: g.commence_time,
+        home: g.home,
+        away: g.away,
+        market: g.market,
+        best: g.best || {},
+      });
+
+      res.json({
+        limit,
+        h2h: (h2h || []).slice(0, limit).map(compactMap),
+        totals: (totals || []).slice(0, limit).map(compactMap),
+        f5_h2h: (f5h2h || []).slice(0, limit).map(compactMap),
+        f5_totals: (f5totals || []).slice(0, limit).map(compactMap),
+        credits_used_today: credits.daily,
+        credits_used_month: credits.monthly
+      });
+    } catch (err) {
+      console.error(`${sport} ${type}_scan error:`, err);
+      sendTelegramMessage(`❌ ${sport.toUpperCase()} ${type} scan failed: ${err.message}`);
+      res.status(500).json({ error: String(err) });
     }
+  });
+}
 
-    if (!canUseCredits(2)) {
-      return res.json({ message: "Monthly credit limit reached", limit: 0 });
-    }
+// Attach scan routes
+makeScanRoute("mlb", "game", 2, FETCHERS.mlb);
+makeScanRoute("mlb", "f5", 2, FETCHERS.mlb);
+makeScanRoute("nfl", "game", 2, FETCHERS.nfl);
+makeScanRoute("nfl", "f5", 2, FETCHERS.nfl);
+makeScanRoute("nba", "game", 2, FETCHERS.nba);
+makeScanRoute("nba", "f5", 2, FETCHERS.nba);
+makeScanRoute("ncaaf", "game", 2, FETCHERS.ncaaf);
+makeScanRoute("ncaaf", "f5", 2, FETCHERS.ncaaf);
+makeScanRoute("ncaab", "game", 2, FETCHERS.ncaab);
 
-    let limit = 5;
-    if (String(req.query.telegram || "").toLowerCase() === "true") limit = 15;
-    if (req.query.limit !== undefined) {
-      limit = Math.min(15, Math.max(1, Number(req.query.limit)));
-    }
-
-    const h2h = await FETCHERS.mlb.f5_h2h({ minHold: null });
-    const totals = await FETCHERS.mlb.f5_totals({ minHold: null });
-
-    let h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
-    let totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
-
-    f5ScanCount++;
-    creditCount += 2;
-    monthlyCredits += 2;
-    console.log(
-      `✅ F5 scan #${f5ScanCount} today → +2 credits (daily=${creditCount}, monthly=${monthlyCredits})`
-    );
-
-    const compactMap = (g) => ({
-      gameId: g.gameId,
-      time: g.commence_time,
-      home: g.home,
-      away: g.away,
-      market: g.market,
-      best: g.best || {},
-    });
-
-    res.json({
-      limit,
-      f5_h2h: h2hLimited.map(compactMap),
-      f5_totals: totalsLimited.map(compactMap),
-      credits_used_today: creditCount,
-      credits_used_month: monthlyCredits
-    });
-  } catch (err) {
-    console.error("f5_scan error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-/* -------------------- MLB Full Game Scan -------------------- */
-app.get("/api/mlb/game_scan", async (req, res) => {
-  try {
-    resetCountersIfNewDay();
-
-    if (!isWithinScanWindow()) {
-      console.log("⏸️ Full game scan skipped (outside window)");
-      return res.json({ message: "Outside scan window", limit: 0 });
-    }
-
-    if (!canUseCredits(4)) {
-      return res.json({ message: "Monthly credit limit reached", limit: 0 });
-    }
-
-    let limit = 5;
-    if (String(req.query.telegram || "").toLowerCase() === "true") limit = 15;
-    if (req.query.limit !== undefined) {
-      limit = Math.min(15, Math.max(1, Number(req.query.limit)));
-    }
-
-    const h2h = await FETCHERS.mlb.h2h({ minHold: null });
-    const totals = await FETCHERS.mlb.totals({ minHold: null });
-    const spreads = await FETCHERS.mlb.spreads({ minHold: null });
-    const teamTotals = await FETCHERS.mlb.team_totals({ minHold: null });
-
-    let h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
-    let totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
-    let spreadsLimited = Array.isArray(spreads) ? spreads.slice(0, limit) : [];
-    let teamTotalsLimited = Array.isArray(teamTotals) ? teamTotals.slice(0, limit) : [];
-
-    gameScanCount++;
-    creditCount += 4;
-    monthlyCredits += 4;
-    console.log(
-      `✅ Full game scan #${gameScanCount} today → +4 credits (daily=${creditCount}, monthly=${monthlyCredits})`
-    );
-
-    const compactMap = (g) => ({
-      gameId: g.gameId,
-      time: g.commence_time,
-      home: g.home,
-      away: g.away,
-      market: g.market,
-      best: g.best || {},
-    });
-
-    res.json({
-      limit,
-      game_h2h: h2hLimited.map(compactMap),
-      game_totals: totalsLimited.map(compactMap),
-      game_spreads: spreadsLimited.map(compactMap),
-      game_team_totals: teamTotalsLimited.map(compactMap),
-      credits_used_today: creditCount,
-      credits_used_month: monthlyCredits
-    });
-  } catch (err) {
-    console.error("game_scan error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-/* -------------------- Odds Handler -------------------- */
+// -------------------- Odds Handler --------------------
 async function oddsHandler(req, res) {
   try {
     const sport = String(req.params.sport || "").toLowerCase();
     const market = String(req.params.market || "").toLowerCase();
-
-    const raw = String(req.query.raw || "").toLowerCase() === "true"; // 🔑 Debug flag
+    const raw = String(req.query.raw || "").toLowerCase() === "true";
 
     if (market.startsWith("prop_")) {
-      const marketKey = market.replace("prop_", ""); 
+      const marketKey = market.replace("prop_", "");
       const data = await getPropsNormalized(sport, marketKey, {});
       return res.json(data);
     }
@@ -246,30 +206,24 @@ async function oddsHandler(req, res) {
       return res.status(400).json({ error: "unsupported", sport, market });
     }
 
-    const minHold = req.query.minHold !== undefined ? Number(req.query.minHold) : null;
-    const limit   = req.query.limit   !== undefined ? Math.max(1, Number(req.query.limit)) : 10;
-    const compact = String(req.query.compact || "").toLowerCase() === "true";
-
-    let data = await FETCHERS[sport][market]({ minHold });
-
+    let data = await FETCHERS[sport][market]({ minHold: null });
     if (raw) return res.json(data);
 
+    let limit = req.query.limit !== undefined ? Math.max(1, Number(req.query.limit)) : 10;
+    const compact = String(req.query.compact || "").toLowerCase() === "true";
     if (!Array.isArray(data)) data = [];
-    if (limit) data = data.slice(0, limit);
+    data = data.slice(0, limit);
 
     if (compact) {
-      data = data.map((g) => {
-        const best  = g.best || {};
-        return {
-          gameId: g.gameId,
-          time: g.commence_time,
-          home: g.home,
-          away: g.away,
-          market: g.market,
-          hold: typeof g.hold === "number" ? Number(g.hold.toFixed(4)) : null,
-          best
-        };
-      });
+      data = data.map((g) => ({
+        gameId: g.gameId,
+        time: g.commence_time,
+        home: g.home,
+        away: g.away,
+        market: g.market,
+        hold: typeof g.hold === "number" ? Number(g.hold.toFixed(4)) : null,
+        best: g.best || {}
+      }));
     }
 
     res.json(data);
@@ -279,10 +233,11 @@ async function oddsHandler(req, res) {
   }
 }
 
-/* -------------------- Routes -------------------- */
 app.get("/api/:sport/:market", oddsHandler);
 
+// -------------------- Startup --------------------
 const PORT = process.env.PORT || 3000;
+loadCredits();
 app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`);
   console.log(`⏱️ Scan window set to ${process.env.SCAN_START_HOUR || "12"} → ${process.env.SCAN_STOP_HOUR || "1"} ET`);

@@ -6,6 +6,7 @@ import cors from "cors";
 import {
   getNFLH2HNormalized, getNFLSpreadsNormalized, getNFLTotalsNormalized,
   getMLBH2HNormalized, getMLBSpreadsNormalized, getMLBTotalsNormalized,
+  getMLBF5Normalized, getMLBTeamTotalsNormalized, getMLBAltLinesNormalized, getMLBPropsNormalized,
   getNBAH2HNormalized, getNBASpreadsNormalized, getNBATotalsNormalized,
   getNCAAFH2HNormalized, getNCAAFSpreadsNormalized, getNCAAFTotalsNormalized,
   getNCAABH2HNormalized, getNCAABSpreadsNormalized, getNCAABTotalsNormalized,
@@ -24,7 +25,15 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 // Supported sports + their fetchers
 const FETCHERS = {
   nfl:   { h2h: getNFLH2HNormalized, spreads: getNFLSpreadsNormalized, totals: getNFLTotalsNormalized },
-  mlb:   { h2h: getMLBH2HNormalized, spreads: getMLBSpreadsNormalized, totals: getMLBTotalsNormalized },
+  mlb:   { 
+    h2h: getMLBH2HNormalized, 
+    spreads: getMLBSpreadsNormalized, 
+    totals: getMLBTotalsNormalized,
+    f5: getMLBF5Normalized,                  // ✅ First 5 ML + Totals
+    teamtotals: getMLBTeamTotalsNormalized,  // ✅ Team Totals
+    altlines: getMLBAltLinesNormalized,      // ✅ Alt Spreads & Totals
+    props: getMLBPropsNormalized             // ✅ Ks, HRs, TB Props
+  },
   nba:   { h2h: getNBAH2HNormalized, spreads: getNBASpreadsNormalized, totals: getNBATotalsNormalized },
   ncaaf: { h2h: getNCAAFH2HNormalized, spreads: getNCAAFSpreadsNormalized, totals: getNCAAFTotalsNormalized },
   ncaab: { h2h: getNCAABH2HNormalized, spreads: getNCAABSpreadsNormalized, totals: getNCAABTotalsNormalized },

@@ -118,5 +118,10 @@ Examples:
 
  Web dashboard for monitoring
 
+ git add .
+git commit -m "Trigger redeploy"
+git push origin main
+
+
 📌 Maintainer: You
 ⚡ Powered by The Odds API + Render

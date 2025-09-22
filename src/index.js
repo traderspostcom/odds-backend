@@ -56,7 +56,7 @@ const FETCHERS = {
   soccer:{ h2h: getSoccerH2HNormalized }
 };
 
-/* -------------------- Helper: Sharp Filter -------------------- */
+/* -------------------- Sharp Filter -------------------- */
 function filterForSharps(games) {
   return games.filter((g) => {
     if (typeof g.tickets !== "number" || typeof g.handle !== "number") return false;
@@ -64,22 +64,42 @@ function filterForSharps(games) {
   });
 }
 
-/* -------------------- Helper: Telegram Alerts -------------------- */
+/* -------------------- Telegram Alerts -------------------- */
 async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
   try {
     const shouldSend = autoMode || (req && String(req.query.telegram || "").toLowerCase() === "true");
+    if (!shouldSend || alerts.length === 0) return;
 
-    if (shouldSend && alerts.length > 0) {
-      const sharpAlerts = filterForSharps(alerts);
+    let finalAlerts = alerts;
+    let modeLabel = "ALL";
 
-      if (sharpAlerts.length > 0) {
-        const formatted = formatSharpBatch(sharpAlerts);
-        const batchMessage = formatted.join("\n\n────────────\n\n");
-        await sendTelegramMessage(batchMessage);
-        console.log(`📨 Sent ${sharpAlerts.length} SHARP alerts in 1 Telegram message.`);
-      } else {
-        console.log("⏸️ No sharp action detected, skipping Telegram push.");
-      }
+    if (String(process.env.SHARPS_ONLY || "").toLowerCase() === "true") {
+      finalAlerts = filterForSharps(alerts);
+      modeLabel = "SHARPS_ONLY";
+    }
+
+    if (finalAlerts.length > 0) {
+      const formatted = formatSharpBatch(finalAlerts);
+
+      // timestamp in ET
+      const now = new Date();
+      const timestamp = now.toLocaleString("en-US", {
+        timeZone: "America/New_York",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit",
+        month: "short",
+        day: "numeric"
+      });
+
+      // header
+      const header = `🔔 *GoSignals Batch Alert*  \n_Mode: ${modeLabel}_  \n⏰ ${timestamp} ET  \nTotal: ${finalAlerts.length}`;
+      const batchMessage = [header, ...formatted].join("\n\n────────────\n\n");
+
+      await sendTelegramMessage(batchMessage);
+      console.log(`📨 Sent ${finalAlerts.length} ${modeLabel} alerts in 1 Telegram message @ ${timestamp} ET.`);
+    } else {
+      console.log("⏸️ No alerts passed filter, skipping Telegram push.");
     }
   } catch (err) {
     console.error("❌ Error sending Telegram alerts:", err);

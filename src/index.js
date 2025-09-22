@@ -223,18 +223,50 @@ async function oddsHandler(req, res) {
 /* -------------------- Routes -------------------- */
 app.get("/api/:sport/:market", oddsHandler);
 
+
 /* -------------------- Auto Scanning -------------------- */
-cron.schedule("*/30 * * * * *", async () => {
-  const now = new Date();
-  const hour = now.getUTCHours() - 4; // crude UTC→ET shift
+// Runs every 3 minutes, ET-adjusted
+cron.schedule("*/3 * * * *", async () => {
+  const hourET = new Date().toLocaleString("en-US", {
+    timeZone: "America/New_York",
+    hour: "numeric",
+    hour12: false
+  });
+
+  const hour = Number(hourET);
 
   if (hour < process.env.SCAN_START_HOUR || hour >= process.env.SCAN_STOP_HOUR) {
-    return;
+    return; // silently skip if outside scan window
   }
 
-  const sports = ...
-  // scanning loop
+  // MLB uses F5 scan, NFL/NCAAF use full game scan
+  const jobs = [
+    { sport: "mlb", path: "f5_scan" },
+    { sport: "nfl", path: "game_scan" },
+    { sport: "ncaaf", path: "game_scan" }
+  ];
+
+  for (const job of jobs) {
+    try {
+      const url = `https://odds-backend-oo4k.onrender.com/api/${job.sport}/${job.path}?telegram=true`;
+      const res = await fetch(url);
+      const data = await res.json();
+
+      // Count bets across all arrays in the response
+      const betCount = Object.values(data)
+        .flat()
+        .filter((x) => Array.isArray(x))
+        .reduce((sum, arr) => sum + arr.length, 0);
+
+      if (betCount > 0) {
+        console.log(`✅ Auto-scan ran for ${job.sport}, found ${betCount} bets`);
+      }
+    } catch (err) {
+      console.error(`❌ Auto-scan failed for ${job.sport}:`, err);
+    }
+  }
 });
+
 
 
 const PORT = process.env.PORT || 3000;

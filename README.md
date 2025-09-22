@@ -122,6 +122,26 @@ Examples:
 git commit -m "Trigger redeploy"
 git push origin main
 
+## 🔔 Testing Telegram Alerts
+
+You can manually trigger a test message to your Telegram bot without waiting for real odds data.
+
+1. Make sure your Render service is running.
+2. Visit this URL in your browser:
+
+https://odds-backend-oo4k.onrender.com/api/test/odds
+
+yaml
+Copy code
+
+3. You should immediately see a formatted test alert (Celtics vs Pistons) appear in your `@gosignals_bot` chat.
+
+---
+
+### Notes
+- This test endpoint does **not** consume Odds API credits.
+- It’s safe to run as often as needed to confirm Telegram connectivity and formatting.
+- Once you’re happy with the look, live scans will send the same style of alerts automatically.
 
 📌 Maintainer: You
 ⚡ Powered by The Odds API + Render

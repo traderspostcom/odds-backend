@@ -4,7 +4,7 @@ import cors from "cors";
 import cron from "node-cron";
 import { FETCHERS, isOn } from "./fetchers.js";
 
-// Odds fetchers
+// Odds fetchers (direct imports for now, can consolidate later)
 import {
   // NFL
   getNFLH2HNormalized, getNFLSpreadsNormalized, getNFLTotalsNormalized,
@@ -20,13 +20,12 @@ import {
   getNCAABH2HNormalized, getNCAABSpreadsNormalized, getNCAABTotalsNormalized,
   // Tennis + Soccer
   getTennisH2HNormalized, getSoccerH2HNormalized,
-  // Props (kept for generic handler)
+  // Props
   getPropsNormalized
 } from "../odds_service.js";
 
-import { sendTelegramMessage } from "../telegram.js";
+import { sendTelegramMessage, formatSharpBatch } from "../telegram.js";
 import { analyzeMarket } from "../sharpEngine.js";
-import { formatSharpBatchV2 } from "../sharpFormatter.js";
 
 const app = express();
 app.use(cors());
@@ -34,160 +33,53 @@ app.use(cors());
 /* -------------------- Health -------------------- */
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-/* -------------------- Helpers -------------------- */
-const isOn = (key, def = false) => {
-  const v = String(process.env[key] ?? "").trim().toLowerCase();
-  if (["1","true","yes","on"].includes(v)) return true;
-  if (["0","false","no","off"].includes(v)) return false;
-  return !!def;
-};
-
-function nowET() {
-  return new Date().toLocaleString("en-US", {
-    timeZone: "America/New_York",
-    month: "short", day: "numeric", hour: "numeric", minute: "2-digit"
-  });
-}
-
-/* -------------------- Fetchers per sport -------------------- */
-const FETCHERS = {
-  nfl:   { h2h: getNFLH2HNormalized,  spreads: getNFLSpreadsNormalized,  totals: getNFLTotalsNormalized },
-  mlb:   {
-    h2h: getMLBH2HNormalized,         spreads: getMLBSpreadsNormalized,  totals: getMLBTotalsNormalized,
-    f5_h2h: getMLBF5H2HNormalized,     f5_totals: getMLBF5TotalsNormalized,
-    team_totals: getMLBTeamTotalsNormalized,  // may 422 → we guard
-    alt: getMLBAltLinesNormalized
-  },
-  nba:   { h2h: getNBAH2HNormalized,  spreads: getNBASpreadsNormalized,  totals: getNBATotalsNormalized },
-  ncaaf: { h2h: getNCAAFH2HNormalized,spreads: getNCAAFSpreadsNormalized,totals: getNCAAFTotalsNormalized },
-  ncaab: { h2h: getNCAABH2HNormalized,spreads: getNCAABSpreadsNormalized,totals: getNCAABTotalsNormalized },
-  tennis:{ h2h: getTennisH2HNormalized },
-  soccer:{ h2h: getSoccerH2HNormalized }
-};
-
-/* -------------------- Safe market fetch (skips unsupported) -------------------- */
-async function fetchMarketSafe(label, fn, args = {}) {
-  try {
-    const out = await fn(args);
-    return Array.isArray(out) ? out : [];
-  } catch (err) {
-    const msg = String(err?.message || err);
-    if (msg.includes("INVALID_MARKET") || msg.includes("Markets not supported")) {
-      console.warn(`⚠️  Skipping unsupported market: ${label}`);
-      return [];
-    }
-    console.error(`❌ Fetch failed for ${label}:`, err);
-    return [];
-  }
-}
-
-/* -------------------- Formatter adapter → V2 card shape -------------------- */
-function toCardShape(a) {
-  if (!a) return null;
-  const marketType = mapMarketType(a.market);
-
-  const tier = (a?.render?.strength || "").toLowerCase().includes("strong")
-    ? "strong" : "lean";
-
-  let alertKind = "initial";
-  if (a?.type === "realert") alertKind = "reentry";
-  if (a?.type === "realert_plus") alertKind = "improved";
-
-  return {
-    id: a.game_id || a.id || `${a?.game?.away}-${a?.game?.home}-${marketType}`,
-    sport: (a.sport || "").toUpperCase(),
-    league: a.league || a.sport || "",
-    marketType,
-    matchup: a.game ? `${a.game.away} @ ${a.game.home}` : undefined,
-    game: {
-      home: a?.game?.home,
-      away: a?.game?.away,
-      start_time_utc: a?.game?.start_time_utc || null
-    },
-    side: {
-      team: a?.sharp_side?.team || null,
-      entryPrice: a?.lines?.sharp_entry ?? null,
-      atOrBetter: true,
-      fairPrice: undefined,
-      consensusPrice: a?.lines?.current_consensus ?? null
-    },
-    lineMove: {
-      open: undefined,
-      current: a?.lines?.current_consensus ?? null,
-      delta: undefined
-    },
-    consensus: a?.consensus ? {
-      ticketsPct: a.consensus.ticketsPct,
-      handlePct:  a.consensus.handlePct,
-      gapPct:     a.consensus.gapPct
-    } : undefined,
-    holdPct: a?.holdPct ?? undefined,
-    score: { total: Number(a?.score ?? 0), tier },
-    signals: Array.isArray(a?.signals) ? a.signals : [],
-    keyNumber: a?.keyNumber || { note: null },
-    books: Array.isArray(a?.books) ? a.books : [],
-    alertKind,
-    cooldownMins: undefined,
-    profile: a?.meta?.profile || process.env.SHARP_PROFILE || "sharpest"
-  };
-}
-
-function mapMarketType(mkt) {
-  if (!mkt) return "H2H";
-  const s = String(mkt).toLowerCase();
-  if (s.includes("spread")) return "Spread";
-  if (s.includes("team") && s.includes("total")) return "Team Total";
-  if (s.includes("total") && s.includes("f5")) return "F5 Total";
-  if (s.includes("h2h")   && s.includes("f5")) return "F5 H2H";
-  if (s.includes("total")) return "Total";
-  return "H2H";
-}
-
-/* -------------------- Telegram: build + send -------------------- */
-async function handleScanAndAlerts(analyzed, req = null, autoMode = false) {
+/* -------------------- Telegram Alerts -------------------- */
+async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
   try {
     const shouldSend = autoMode || (req && String(req.query.telegram || "").toLowerCase() === "true");
-    if (!shouldSend || !Array.isArray(analyzed) || analyzed.length === 0) return;
+    if (!shouldSend || alerts.length === 0) return;
 
-    const cards = analyzed.map(toCardShape).filter(Boolean);
-    const credits = process.env.CREDITS_MONTHLY_LIMIT
-      ? { used: Number(process.env.CREDITS_USED || 0), limit: Number(process.env.CREDITS_MONTHLY_LIMIT) }
-      : null;
+    const formatted = formatSharpBatch(alerts);
 
-    const text = formatSharpBatchV2(cards, {
-      mode: (process.env.SHARP_PROFILE || "sharpest").toUpperCase(),
-      auto: Boolean(autoMode),
-      credits,
-      now: new Date()
+    const now = new Date();
+    const timestamp = now.toLocaleString("en-US", {
+      timeZone: "America/New_York",
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+      month: "short",
+      day: "numeric"
     });
 
-    await sendTelegramMessage(text);
-    console.log(`📨 Sent ${cards.length} alerts @ ${nowET()} ET`);
+    const header = `🔔 *GoSignals Batch Alert*  \n⏰ ${timestamp} ET  \nTotal: ${alerts.length}`;
+    const batchMessage = [header, ...formatted].join("\n\n────────────\n\n");
+
+    await sendTelegramMessage(batchMessage);
+    console.log(`📨 Sent ${alerts.length} alerts in 1 Telegram message @ ${timestamp} ET.`);
   } catch (err) {
     console.error("❌ Error sending Telegram alerts:", err);
   }
 }
 
-/* --------------------------------------------------------------- */
-/*                         ROUTES (Existing)                       */
-/* --------------------------------------------------------------- */
-
-/* -------------------- MLB F5 Scan (kept) -------------------- */
+/* -------------------- MLB F5 Scan -------------------- */
 app.get("/api/mlb/f5_scan", async (req, res) => {
   try {
     let limit = 5;
     if (String(req.query.telegram || "").toLowerCase() === "true") limit = 15;
-    if (req.query.limit !== undefined) limit = Math.min(15, Math.max(1, Number(req.query.limit)));
+    if (req.query.limit !== undefined) {
+      limit = Math.min(15, Math.max(1, Number(req.query.limit)));
+    }
 
-    const h2h    = await fetchMarketSafe("MLB F5 H2H",    FETCHERS.mlb.f5_h2h,    { minHold: null });
-    const totals = await fetchMarketSafe("MLB F5 Totals", FETCHERS.mlb.f5_totals, { minHold: null });
+    const h2h = await FETCHERS.mlb.f5_h2h({ minHold: null });
+    const totals = await FETCHERS.mlb.f5_totals({ minHold: null });
 
     const combined = [
       ...(Array.isArray(h2h) ? h2h.slice(0, limit) : []),
       ...(Array.isArray(totals) ? totals.slice(0, limit) : [])
     ];
 
-    const analyzed = combined.map(a => analyzeMarket(a)).filter(Boolean);
+    const analyzed = combined.map(a => analyzeMarket(a)).filter(a => a !== null);
+
     await handleScanAndAlerts(analyzed, req);
     res.json({ limit, f5_h2h: h2h, f5_totals: totals });
   } catch (err) {
@@ -196,19 +88,19 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
   }
 });
 
-/* -------------------- MLB Full Game Scan (kept) -------------------- */
+/* -------------------- MLB Full Game Scan -------------------- */
 app.get("/api/mlb/game_scan", async (req, res) => {
   try {
     let limit = 5;
     if (String(req.query.telegram || "").toLowerCase() === "true") limit = 15;
-    if (req.query.limit !== undefined) limit = Math.min(15, Math.max(1, Number(req.query.limit)));
+    if (req.query.limit !== undefined) {
+      limit = Math.min(15, Math.max(1, Number(req.query.limit)));
+    }
 
-    const h2h        = await fetchMarketSafe("MLB H2H",         FETCHERS.mlb.h2h,         { minHold: null });
-    const totals     = await fetchMarketSafe("MLB Totals",      FETCHERS.mlb.totals,      { minHold: null });
-    const spreads    = await fetchMarketSafe("MLB Spreads",     FETCHERS.mlb.spreads,     { minHold: null });
-    const teamTotals = isOn("ENABLE_MLB_TEAM_TOTALS", true)
-      ? await fetchMarketSafe("MLB Team Totals", FETCHERS.mlb.team_totals, { minHold: null })
-      : [];
+    const h2h = await FETCHERS.mlb.h2h({ minHold: null });
+    const totals = await FETCHERS.mlb.totals({ minHold: null });
+    const spreads = await FETCHERS.mlb.spreads({ minHold: null });
+    const teamTotals = await FETCHERS.mlb.team_totals({ minHold: null });
 
     const combined = [
       ...(Array.isArray(h2h) ? h2h.slice(0, limit) : []),
@@ -217,7 +109,8 @@ app.get("/api/mlb/game_scan", async (req, res) => {
       ...(Array.isArray(teamTotals) ? teamTotals.slice(0, limit) : [])
     ];
 
-    const analyzed = combined.map(a => analyzeMarket(a)).filter(Boolean);
+    const analyzed = combined.map(a => analyzeMarket(a)).filter(a => a !== null);
+
     await handleScanAndAlerts(analyzed, req);
     res.json({ limit, h2h, totals, spreads, teamTotals });
   } catch (err) {
@@ -226,13 +119,13 @@ app.get("/api/mlb/game_scan", async (req, res) => {
   }
 });
 
-/* -------------------- Generic Odds JSON (debug) -------------------- */
-app.get("/api/:sport/:market", async (req, res) => {
+/* -------------------- Odds Handler -------------------- */
+async function oddsHandler(req, res) {
   try {
     const sport = String(req.params.sport || "").toLowerCase();
     const market = String(req.params.market || "").toLowerCase();
-    const raw = String(req.query.raw || "").toLowerCase() === "true";
 
+    const raw = String(req.query.raw || "").toLowerCase() === "true";
     if (market.startsWith("prop_")) {
       const marketKey = market.replace("prop_", "");
       const data = await getPropsNormalized(sport, marketKey, {});
@@ -243,131 +136,43 @@ app.get("/api/:sport/:market", async (req, res) => {
       return res.status(400).json({ error: "unsupported", sport, market });
     }
 
-    const data = await fetchMarketSafe(`${sport} ${market}`, FETCHERS[sport][market], { minHold: null });
+    let data = await FETCHERS[sport][market]({ minHold: null });
     if (raw) return res.json(data);
 
-    const analyzed = Array.isArray(data) ? data.map(a => analyzeMarket(a)).filter(Boolean) : [];
-    const cards = analyzed.map(toCardShape).filter(Boolean);
-    res.json(cards);
+    const analyzed = Array.isArray(data)
+      ? data.map(a => analyzeMarket(a)).filter(a => a !== null)
+      : [];
+
+    res.json(analyzed);
   } catch (err) {
     console.error("oddsHandler error:", err);
     res.status(500).json({ error: String(err) });
   }
-});
-
-/* --------------------------------------------------------------- */
-/*               NEW: /api/scan/:sport (respects toggles)         */
-/* --------------------------------------------------------------- */
-
-app.get("/api/scan/:sport", async (req, res) => {
-  try {
-    const sport = String(req.params.sport || "").toLowerCase();
-    if (!FETCHERS[sport]) return res.status(400).json({ error: "unsupported_sport", sport });
-
-    const limit = Math.min(15, Math.max(1, Number(req.query.limit ?? 15)));
-    const wantsTelegram = String(req.query.telegram || "").toLowerCase() === "true";
-
-    const batches = [];
-
-if (sport === "mlb") {
-  if (isOn("ENABLE_MLB_H2H", true))
-    batches.push(fetchMarketSafe("MLB H2H", FETCHERS.mlb.h2h, { minHold: null }));
-  if (isOn("ENABLE_MLB_SPREADS", true))
-    batches.push(fetchMarketSafe("MLB Spreads", FETCHERS.mlb.spreads, { minHold: null }));
-  if (isOn("ENABLE_MLB_TOTALS", true))
-    batches.push(fetchMarketSafe("MLB Totals", FETCHERS.mlb.totals, { minHold: null }));
-  if (isOn("ENABLE_MLB_F5_H2H", true))
-    batches.push(fetchMarketSafe("MLB F5 H2H", FETCHERS.mlb.f5_h2h, { minHold: null }));
-  if (isOn("ENABLE_MLB_F5_TOTALS", true))
-    batches.push(fetchMarketSafe("MLB F5 Totals", FETCHERS.mlb.f5_totals, { minHold: null }));
-  if (isOn("ENABLE_MLB_TEAM_TOTALS", true))
-    batches.push(fetchMarketSafe("MLB Team Totals", FETCHERS.mlb.team_totals, { minHold: null }));
-  if (isOn("ENABLE_MLB_ALT", true))
-    batches.push(fetchMarketSafe("MLB Alt", FETCHERS.mlb.alt, { minHold: null }));
 }
+app.get("/api/:sport/:market", oddsHandler);
 
-if (sport === "nfl") {
-  if (isOn("ENABLE_NFL_H2H", true))
-    batches.push(fetchMarketSafe("NFL H2H", FETCHERS.nfl.h2h, { minHold: null }));
-  if (isOn("ENABLE_NFL_SPREADS", true))
-    batches.push(fetchMarketSafe("NFL Spreads", FETCHERS.nfl.spreads, { minHold: null }));
-  if (isOn("ENABLE_NFL_TOTALS", true))
-    batches.push(fetchMarketSafe("NFL Totals", FETCHERS.nfl.totals, { minHold: null }));
-
-  if (isOn("ENABLE_NFL_H1", true)) {
-    if (FETCHERS.nfl.h1_spreads)
-      batches.push(fetchMarketSafe("NFL 1H Spreads", FETCHERS.nfl.h1_spreads, { minHold: null }));
-    if (FETCHERS.nfl.h1_totals)
-      batches.push(fetchMarketSafe("NFL 1H Totals", FETCHERS.nfl.h1_totals, { minHold: null }));
-    if (FETCHERS.nfl.h1_h2h)
-      batches.push(fetchMarketSafe("NFL 1H H2H", FETCHERS.nfl.h1_h2h, { minHold: null }));
-  }
-
-if (sport === "nba") {
-  if (isOn("ENABLE_NBA_H2H", true))
-    batches.push(fetchMarketSafe("NBA H2H", FETCHERS.nba.h2h, { minHold: null }));
-  if (isOn("ENABLE_NBA_SPREADS", true))
-    batches.push(fetchMarketSafe("NBA Spreads", FETCHERS.nba.spreads, { minHold: null }));
-  if (isOn("ENABLE_NBA_TOTALS", true))
-    batches.push(fetchMarketSafe("NBA Totals", FETCHERS.nba.totals, { minHold: null }));
-}
-
-if (sport === "ncaaf") {
-  if (isOn("ENABLE_NCAAF_H2H", true))
-    batches.push(fetchMarketSafe("NCAAF H2H", FETCHERS.ncaaf.h2h, { minHold: null }));
-  if (isOn("ENABLE_NCAAF_SPREADS", true))
-    batches.push(fetchMarketSafe("NCAAF Spreads", FETCHERS.ncaaf.spreads, { minHold: null }));
-  if (isOn("ENABLE_NCAAF_TOTALS", true))
-    batches.push(fetchMarketSafe("NCAAF Totals", FETCHERS.ncaaf.totals, { minHold: null }));
-}
-
-if (sport === "ncaab") {
-  if (isOn("ENABLE_NCAAB_H2H", true))
-    batches.push(fetchMarketSafe("NCAAB H2H", FETCHERS.ncaab.h2h, { minHold: null }));
-  if (isOn("ENABLE_NCAAB_SPREADS", true))
-    batches.push(fetchMarketSafe("NCAAB Spreads", FETCHERS.ncaab.spreads, { minHold: null }));
-  if (isOn("ENABLE_NCAAB_TOTALS", true))
-    batches.push(fetchMarketSafe("NCAAB Totals", FETCHERS.ncaab.totals, { minHold: null }));
-}
-
-
-    const settled = await Promise.all(batches);
-    const flattened = settled.flat();
-    const limited = flattened.slice(0, limit);
-
-    const analyzed = limited.map(a => analyzeMarket(a)).filter(Boolean);
-    await handleScanAndAlerts(analyzed, wantsTelegram ? req : null, wantsTelegram);
-
-    res.json({
-      sport, limit,
-      analyzed: analyzed.length,
-      pulled: flattened.length
-    });
-  } catch (err) {
-    console.error("scan route error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-/* --------------------------------------------------------------- */
-/*                         AUTO SCANNING                          */
-/* --------------------------------------------------------------- */
-
+/* -------------------- Auto Scanning -------------------- */
 cron.schedule("*/3 * * * *", async () => {
-  const hourET = new Date().toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", hour12: false });
+  const hourET = new Date().toLocaleString("en-US", {
+    timeZone: "America/New_York",
+    hour: "numeric",
+    hour12: false
+  });
   const hour = Number(hourET);
 
-  if (hour < Number(process.env.SCAN_START_HOUR || 6) ||
-      hour >= Number(process.env.SCAN_STOP_HOUR || 24)) return;
+  if (hour < process.env.SCAN_START_HOUR || hour >= process.env.SCAN_STOP_HOUR) return;
 
   const sports = (process.env.SCAN_SPORTS || "mlb").split(",").map(s => s.trim().toLowerCase());
   for (const sport of sports) {
     try {
-      // Always use your canonical app URL
-      const url = `https://odds-backend-oo4k.onrender.com/api/scan/${sport}?telegram=true&limit=15`;
+      const url = `https://odds-backend-oo4k.onrender.com/api/${sport}/f5_scan?telegram=true`;
       const res = await fetch(url);
       const data = await res.json();
-      console.log(`🤖 Auto-scan ${sport}: pulled=${data.pulled} analyzed=${data.analyzed}`);
+
+      const betCount = Array.isArray(data) ? data.length : 0;
+      if (betCount > 0) {
+        console.log(`✅ Auto-scan ran for ${sport}, found ${betCount} bets`);
+      }
     } catch (err) {
       console.error(`❌ Auto-scan failed for ${sport}:`, err);
     }

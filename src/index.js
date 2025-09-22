@@ -4,6 +4,68 @@ import cors from "cors";
 import cron from "node-cron";
 import { FETCHERS, isOn } from "./fetchers.js";
 
+/* -------------------- Rate-limit helpers -------------------- */
+const RATE_LIMIT_MS = Number(process.env.RATE_LIMIT_MS || 350);     // delay between requests
+const RETRY_429_MAX = Number(process.env.RETRY_429_MAX || 3);       // max retries on 429
+const RETRY_BASE_MS = Number(process.env.RETRY_BASE_MS || 400);     // backoff base
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+async function fetchWithRetry(label, fn, args = {}) {
+  let attempt = 0;
+  // small jitter so parallel deploys don’t sync their spikes
+  const jitter = () => Math.floor(Math.random() * 120);
+
+  while (true) {
+    try {
+      const out = await fn(args);
+      return Array.isArray(out) ? out : [];
+    } catch (err) {
+      const msg = String(err?.message || err);
+
+      // Unsupported / 422 → skip quietly
+      if (
+        msg.includes("INVALID_MARKET") ||
+        msg.includes("Markets not supported") ||
+        msg.includes("status=422")
+      ) {
+        console.warn(`⚠️  Skipping unsupported market: ${label}`);
+        return [];
+      }
+
+      // 429 backoff & retry
+      if (msg.includes("429") || msg.toLowerCase().includes("too many requests")) {
+        if (attempt >= RETRY_429_MAX) {
+          console.warn(`⏳ 429 on ${label} — max retries hit, skipping`);
+          return [];
+        }
+        const wait = RETRY_BASE_MS * Math.pow(2, attempt) + jitter();
+        console.warn(`⏳ 429 on ${label} — retrying in ${wait}ms (attempt ${attempt + 1}/${RETRY_429_MAX})`);
+        await sleep(wait);
+        attempt++;
+        continue;
+      }
+
+      // Other errors → log and skip
+      console.error(`❌ Fetch failed for ${label}:`, err);
+      return [];
+    }
+  }
+}
+
+/** Run fetch jobs one-by-one with a fixed pacing delay to avoid bursts. */
+async function runSequential(labelledJobs) {
+  const results = [];
+  for (const job of labelledJobs) {
+    const [label, fn, args] = job;
+    const data = await fetchWithRetry(label, fn, args);
+    results.push(data);
+    await sleep(RATE_LIMIT_MS);
+  }
+  return results.flat();
+}
+
+
 // Direct odds imports kept for existing routes and props handler
 import {
   // NFL

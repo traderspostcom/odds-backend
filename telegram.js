@@ -36,7 +36,7 @@ export async function sendTelegramMessage(message) {
 export function formatSharpAlert(game, marketType) {
   const { home, away, time, best } = game;
 
-  let message = `📊 *Sharp Alert!*\n\n`;
+  let message = `📊 *GoSignals Alert!*\n\n`;
   message += `🕒 ${time || "TBD"}\n`;
   message += `⚔️ ${away} vs ${home}\n`;
   message += `🎯 Market: ${marketType.toUpperCase()}\n\n`;

@@ -1,6 +1,11 @@
 export default {
   /* -------------------- Profiles -------------------- */
   profiles: {
+      /* -------------------- Score thresholds (global) -------------------- */
+  thresholds: {
+    strong: 5,   // 🟢 STRONG at score ≥ 5
+    lean: 3      // 🟡 LEAN at score ≥ 3
+  },
     // 🟢 Sharpest of the sharp
     sharpest: {
       handleTickets: {

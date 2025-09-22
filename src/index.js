@@ -24,7 +24,8 @@ import {
 } from "../odds_service.js";
 
 import { sendTelegramMessage, formatSharpBatch } from "../telegram.js";
-import { analyzeMarket } from "../sharpEngine.js"; // NEW: sharp engine
+import { analyzeMarket } from "../sharpEngine.js"; // sharp logic
+import { formatSharpAlert } from "../sharpFormatter.js"; // pretty output
 
 const app = express();
 app.use(cors());
@@ -97,7 +98,8 @@ async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
         try {
           const alert = analyzeMarket(g);
           if (alert) {
-            await sendTelegramMessage("```json\n" + JSON.stringify(alert, null, 2) + "\n```");
+            const pretty = formatSharpAlert(alert);
+            if (pretty) await sendTelegramMessage(pretty);
             console.log("🔔 Sharp alert generated:", alert.render.title);
           }
         } catch (err) {
@@ -159,7 +161,8 @@ async function oddsHandler(req, res) {
       try {
         const alert = analyzeMarket(g);
         if (alert) {
-          await sendTelegramMessage("```json\n" + JSON.stringify(alert, null, 2) + "\n```");
+          const pretty = formatSharpAlert(alert);
+          if (pretty) await sendTelegramMessage(pretty);
           console.log("🔔 Sharp alert generated:", alert.render.title);
         }
       } catch (err) {
@@ -220,7 +223,8 @@ cron.schedule("*/3 * * * *", async () => {
                 try {
                   const alert = analyzeMarket(g);
                   if (alert) {
-                    await sendTelegramMessage("```json\n" + JSON.stringify(alert, null, 2) + "\n```");
+                    const pretty = formatSharpAlert(alert);
+                    if (pretty) await sendTelegramMessage(pretty);
                     console.log("🔔 Sharp alert generated:", alert.render.title);
                   }
                 } catch (err) {

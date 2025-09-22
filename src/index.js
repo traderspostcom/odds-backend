@@ -1,9 +1,9 @@
-// src/index.js
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import cron from "node-cron";
 
+// Odds normalizers
 import {
   // NFL
   getNFLH2HNormalized, getNFLSpreadsNormalized, getNFLTotalsNormalized,
@@ -25,7 +25,7 @@ import {
   // Tennis + Soccer
   getTennisH2HNormalized, getSoccerH2HNormalized,
 
-  // Generic props
+  // Props
   getPropsNormalized
 } from "../odds_service.js";
 
@@ -81,7 +81,6 @@ async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
     if (finalAlerts.length > 0) {
       const formatted = formatSharpBatch(finalAlerts);
 
-      // timestamp in ET
       const now = new Date();
       const timestamp = now.toLocaleString("en-US", {
         timeZone: "America/New_York",
@@ -92,14 +91,11 @@ async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
         day: "numeric"
       });
 
-      // header
       const header = `🔔 *GoSignals Batch Alert*  \n_Mode: ${modeLabel}_  \n⏰ ${timestamp} ET  \nTotal: ${finalAlerts.length}`;
       const batchMessage = [header, ...formatted].join("\n\n────────────\n\n");
 
       await sendTelegramMessage(batchMessage);
       console.log(`📨 Sent ${finalAlerts.length} ${modeLabel} alerts in 1 Telegram message @ ${timestamp} ET.`);
-    } else {
-      console.log("⏸️ No alerts passed filter, skipping Telegram push.");
     }
   } catch (err) {
     console.error("❌ Error sending Telegram alerts:", err);
@@ -122,7 +118,6 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
     const totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
 
     const combined = [...h2hLimited, ...totalsLimited];
-
     await handleScanAndAlerts(combined, req);
 
     res.json({ limit, f5_h2h: h2hLimited, f5_totals: totalsLimited });
@@ -152,7 +147,6 @@ app.get("/api/mlb/game_scan", async (req, res) => {
     const teamTotalsLimited = Array.isArray(teamTotals) ? teamTotals.slice(0, limit) : [];
 
     const combined = [...h2hLimited, ...totalsLimited, ...spreadsLimited, ...teamTotalsLimited];
-
     await handleScanAndAlerts(combined, req);
 
     res.json({
@@ -190,7 +184,6 @@ async function oddsHandler(req, res) {
     const compact = String(req.query.compact || "").toLowerCase() === "true";
 
     let data = await FETCHERS[sport][market]({ minHold });
-
     if (raw) return res.json(data);
 
     if (!Array.isArray(data)) data = [];
@@ -223,9 +216,8 @@ async function oddsHandler(req, res) {
 /* -------------------- Routes -------------------- */
 app.get("/api/:sport/:market", oddsHandler);
 
-
 /* -------------------- Auto Scanning -------------------- */
-// Runs every 3 minutes, ET-adjusted
+// Every 3 minutes, ET-adjusted
 cron.schedule("*/3 * * * *", async () => {
   const hourET = new Date().toLocaleString("en-US", {
     timeZone: "America/New_York",
@@ -234,16 +226,12 @@ cron.schedule("*/3 * * * *", async () => {
   });
 
   const hour = Number(hourET);
+  if (hour < process.env.SCAN_START_HOUR || hour >= process.env.SCAN_STOP_HOUR) return;
 
-  if (hour < process.env.SCAN_START_HOUR || hour >= process.env.SCAN_STOP_HOUR) {
-    return; // silently skip if outside scan window
-  }
-
-  // MLB uses F5 scan, NFL/NCAAF use full game scan
   const jobs = [
-    { sport: "mlb", path: "f5_scan" },
-    { sport: "nfl", path: "game_scan" },
-    { sport: "ncaaf", path: "game_scan" }
+    { sport: "mlb", path: "f5_scan" },   // MLB First 5
+    { sport: "nfl", path: "game_scan" }, // NFL full game
+    { sport: "ncaaf", path: "game_scan"} // NCAAF full game
   ];
 
   for (const job of jobs) {
@@ -252,9 +240,7 @@ cron.schedule("*/3 * * * *", async () => {
       const res = await fetch(url);
       const data = await res.json();
 
-      // Count bets across all arrays in the response
       const betCount = Object.values(data)
-        .flat()
         .filter((x) => Array.isArray(x))
         .reduce((sum, arr) => sum + arr.length, 0);
 
@@ -266,8 +252,6 @@ cron.schedule("*/3 * * * *", async () => {
     }
   }
 });
-
-
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));

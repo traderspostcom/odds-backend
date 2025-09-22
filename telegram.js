@@ -28,7 +28,7 @@ export function formatSharpBatch(games) {
     const marketLabel = mapMarketKey(g.market);
     const holdText = g.hold !== null ? `💰 Hold: ${(g.hold * 100).toFixed(2)}%` : "";
 
-    let msg = `📊 *GoSignals Sharp Alert!*\n\n`;
+    let msg = `📊 *GoSignals Alert!*\n\n`;
     msg += `📅 ${g.time || "TBD"}\n`;
     msg += `⚔️ ${g.away} @ ${g.home}\n\n`;
     msg += `🎯 Market: ${marketLabel}\n`;

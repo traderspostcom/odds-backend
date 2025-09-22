@@ -123,6 +123,55 @@ async function oddsHandler(req, res) {
     res.status(500).json({ error: String(err) });
   }
 }
+/* -------------------- Auto Scanner -------------------- */
+const SCAN_START_HOUR = Number(process.env.SCAN_START_HOUR || 7);   // default 7 AM ET
+const SCAN_STOP_HOUR  = Number(process.env.SCAN_STOP_HOUR || 23);  // default 11 PM ET
+const SCAN_SPORTS = (process.env.SCAN_SPORTS || "mlb").split(",");
+
+async function runScans() {
+  const now = new Date();
+  const hourET = now.getUTCHours() - 4; // crude ET conversion (UTC-4, adjust DST if needed)
+
+  if (hourET < SCAN_START_HOUR || hourET >= SCAN_STOP_HOUR) {
+    return; // ⏸️ Outside scan window
+  }
+
+  for (const sport of SCAN_SPORTS) {
+    try {
+      if (!FETCHERS[sport]) continue; // skip unsupported
+
+      let combined = [];
+
+      if (sport === "mlb") {
+        const f5 = await FETCHERS.mlb.f5_h2h({ minHold: null });
+        const f5Totals = await FETCHERS.mlb.f5_totals({ minHold: null });
+        const fullH2H = await FETCHERS.mlb.h2h({ minHold: null });
+        const fullTotals = await FETCHERS.mlb.totals({ minHold: null });
+        const spreads = await FETCHERS.mlb.spreads({ minHold: null });
+        const teamTotals = await FETCHERS.mlb.team_totals({ minHold: null });
+
+        combined = [...(f5 || []), ...(f5Totals || []), ...(fullH2H || []), ...(fullTotals || []), ...(spreads || []), ...(teamTotals || [])];
+      } else {
+        // Generic H2H / Spreads / Totals for other sports
+        const h2h = await FETCHERS[sport].h2h?.({ minHold: null }) || [];
+        const spreads = await FETCHERS[sport].spreads?.({ minHold: null }) || [];
+        const totals = await FETCHERS[sport].totals?.({ minHold: null }) || [];
+
+        combined = [...h2h, ...spreads, ...totals];
+      }
+
+      if (combined.length > 0) {
+        const message = formatSharpBatch(combined);
+        await sendTelegramMessage(message);
+      }
+    } catch (err) {
+      console.error(`❌ Auto scan error for ${sport}:`, err);
+    }
+  }
+}
+
+// Kick off every 30 seconds
+setInterval(runScans, 30 * 1000);
 
 /* -------------------- Routes -------------------- */
 app.get("/api/:sport/:market", oddsHandler);

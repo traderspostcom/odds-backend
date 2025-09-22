@@ -33,12 +33,17 @@ export default {
     intervalMinutes: Number(process.env.SCAN_INTERVAL || 3)  // default every 3 minutes
   },
 
-  /* -------------------- Sports + Market Toggles -------------------- */
-  sports: {
-    mlb:   { f5: true, full: true },
-    nfl:   { h1: true, full: true },
-    ncaaf: { h1: true, full: true },
-    nba:   { h1: process.env.SCAN_NBA_H1 === "true", full: true },
-    ncaab: { h1: process.env.SCAN_NCAAB_H1 === "true", full: true }
+/* -------------------- Sports + Market Toggles -------------------- */
+sports: {
+  mlb:   { f5: true, full: true },
+  nfl:   { h1: true, full: true },
+  ncaaf: { h1: true, full: true },
+  nba:   { 
+    h1: process.env.SCAN_NBA_H1 === "true", 
+    full: process.env.SCAN_NBA_FULL === "true" 
+  },
+  ncaab: { 
+    h1: process.env.SCAN_NCAAB_H1 === "true", 
+    full: process.env.SCAN_NCAAB_FULL === "true" 
   }
 };

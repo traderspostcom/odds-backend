@@ -1,89 +1,49 @@
 // telegram.js
-const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const SHARP_BOOKS = (process.env.SHARP_BOOKS || "")
-  .split(",")
-  .map(b => b.trim().toLowerCase());
 
 /**
- * Sends a plain text message to Telegram.
+ * Maps API market keys to human-readable short labels
  */
-export async function sendTelegramMessage(message) {
-  try {
-    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text: message,
-        parse_mode: "Markdown" // ✅ bold, italics, emojis
-      })
-    });
-
-    if (!res.ok) {
-      console.error("❌ Telegram send failed:", await res.text());
-    } else {
-      console.log(`📨 Telegram alert sent: ${message}`);
-    }
-  } catch (err) {
-    console.error("❌ Telegram send error:", err);
-  }
-}
-
-/**
- * Formats a sharp betting alert for Telegram.
- * Includes H2H, Totals, Spreads, Team Totals
- */
-export function formatSharpAlert(game, marketType) {
-  const { home, away, time, best, hold } = game;
-
-  let message = `📊 *GoSignals Sharp Alert!*\n\n`;
-  message += `🕒 ${time || "TBD"}\n`;
-  message += `⚔️ ${away} vs ${home}\n`;
-  message += `🎯 Market: ${marketType.toUpperCase()}\n\n`;
-
-  switch (marketType.toLowerCase()) {
+function mapMarketKey(market) {
+  switch (market.toLowerCase()) {
     case "h2h":
-    case "f5_h2h":
-      message += `🏠 Home: ${best?.home ? `${best.home.book} (${best.home.price})` : "N/A"}\n`;
-      message += `🛫 Away: ${best?.away ? `${best.away.book} (${best.away.price})` : "N/A"}`;
-      break;
-
+    case "h2h_1st_5_innings":
+      return "ML";
     case "totals":
-    case "f5_totals":
-      message += `⬆️ Over: ${best?.O ? `${best.O.book} ${best.O.point || ""} (${best.O.price})` : "N/A"}\n`;
-      message += `⬇️ Under: ${best?.U ? `${best.U.book} ${best.U.point || ""} (${best.U.price})` : "N/A"}`;
-      break;
-
+    case "totals_1st_5_innings":
+      return "TOT";
     case "spreads":
-      message += `⭐ Favorite: ${best?.FAV ? `${best.FAV.book} ${best.FAV.point || ""} (${best.FAV.price})` : "N/A"}\n`;
-      message += `🐶 Underdog: ${best?.DOG ? `${best.DOG.book} ${best.DOG.point || ""} (${best.DOG.price})` : "N/A"}`;
-      break;
-
+      return "SP";
     case "team_totals":
-      message += `🏠 Home TT: ${best?.home ? `${best.home.book} ${best.home.point || ""} (${best.home.price})` : "N/A"}\n`;
-      message += `🛫 Away TT: ${best?.away ? `${best.away.book} ${best.away.point || ""} (${best.away.price})` : "N/A"}`;
-      break;
-
+      return "TT";
     default:
-      message += `⚠️ No formatter for market type: ${marketType}`;
+      return market.toUpperCase();
   }
-
-  if (typeof hold === "number") {
-    message += `\n\n💰 Hold: ${(hold * 100).toFixed(2)}%`;
-  }
-
-  return message;
 }
 
 /**
- * Batch formatter: sends multiple sharp hits as separate alerts
+ * Format a batch of sharp alerts into nice Telegram messages.
  */
 export function formatSharpBatch(games) {
-  return games.flatMap(g => {
-    if (!g.market) return [];
-    return [formatSharpAlert(g, g.market)];
+  return games.map((g) => {
+    const marketLabel = mapMarketKey(g.market);
+    const holdText = g.hold !== null ? `💰 Hold: ${(g.hold * 100).toFixed(2)}%` : "";
+
+    let msg = `📊 *GoSignals Sharp Alert!*\n\n`;
+    msg += `📅 ${g.time || "TBD"}\n`;
+    msg += `⚔️ ${g.away} @ ${g.home}\n\n`;
+    msg += `🎯 Market: ${marketLabel}\n`;
+
+    if (g.best) {
+      if (g.best.home) msg += `🏠 ${g.home}: ${g.best.home.book} (${g.best.home.price})\n`;
+      if (g.best.away) msg += `🛫 ${g.away}: ${g.best.away.book} (${g.best.away.price})\n`;
+      if (g.best.O) msg += `⬆️ Over ${g.best.O.point || ""}: ${g.best.O.book} (${g.best.O.price})\n`;
+      if (g.best.U) msg += `⬇️ Under ${g.best.U.point || ""}: ${g.best.U.book} (${g.best.U.price})\n`;
+      if (g.best.FAV) msg += `⭐ Fav ${g.best.FAV.point || ""}: ${g.best.FAV.book} (${g.best.FAV.price})\n`;
+      if (g.best.DOG) msg += `🐶 Dog ${g.best.DOG.point || ""}: ${g.best.DOG.book} (${g.best.DOG.price})\n`;
+    }
+
+    if (holdText) msg += `\n${holdText}`;
+
+    return msg;
   });
 }

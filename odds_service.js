@@ -332,3 +332,22 @@ export async function getSoccerH2HNormalized(opts) {
   const games = await fetchOdds("soccer_usa_mls", "h2h");
   return normalizeGames(games, "h2h", opts);
 }
+/* ========================================================================
+ * NFL — First Half (1H) helpers
+ * Reuse your existing normalizers and forward a period hint.
+ * If the provider ignores `period: "1h"`, your upstream safe fetcher will
+ * still handle gracefully (and your toggles can disable if needed).
+ * ====================================================================== */
+
+export async function getNFLH1H2HNormalized(options = {}) {
+  // Reuse the full-game normalizer, but request 1H when supported.
+  return await getNFLH2HNormalized({ ...options, period: "1h" });
+}
+
+export async function getNFLH1SpreadsNormalized(options = {}) {
+  return await getNFLSpreadsNormalized({ ...options, period: "1h" });
+}
+
+export async function getNFLH1TotalsNormalized(options = {}) {
+  return await getNFLTotalsNormalized({ ...options, period: "1h" });
+}

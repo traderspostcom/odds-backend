@@ -1,8 +1,8 @@
-// src/index.js
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import cron from "node-cron";
+import fetch from "node-fetch";
 
 import {
   // NFL
@@ -24,8 +24,6 @@ import {
 } from "../odds_service.js";
 
 import { sendTelegramMessage, formatSharpBatch } from "../telegram.js";
-import { analyzeMarket } from "../sharpEngine.js"; // sharp logic
-import { formatSharpAlert } from "../sharpFormatter.js"; // pretty output
 
 const app = express();
 app.use(cors());
@@ -92,25 +90,62 @@ async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
 
       await sendTelegramMessage(batchMessage);
       console.log(`📨 Sent ${finalAlerts.length} ${modeLabel} alerts in 1 Telegram message @ ${timestamp} ET.`);
-
-      // 🔎 Run sharp engine on each alert
-      for (const g of finalAlerts) {
-        try {
-          const alert = analyzeMarket(g);
-          if (alert) {
-            const pretty = formatSharpAlert(alert);
-            if (pretty) await sendTelegramMessage(pretty);
-            console.log("🔔 Sharp alert generated:", alert.render.title);
-          }
-        } catch (err) {
-          console.error("❌ Sharp engine failed:", err);
-        }
-      }
     }
   } catch (err) {
     console.error("❌ Error sending Telegram alerts:", err);
   }
 }
+
+/* -------------------- MLB Routes -------------------- */
+app.get("/api/mlb/f5_scan", async (req, res) => {
+  try {
+    const h2h = await FETCHERS.mlb.f5_h2h({ minHold: null });
+    const totals = await FETCHERS.mlb.f5_totals({ minHold: null });
+    const combined = [...(h2h || []), ...(totals || [])];
+
+    await handleScanAndAlerts(combined, req);
+    res.json({ f5_h2h: h2h, f5_totals: totals });
+  } catch (err) {
+    console.error("f5_scan error:", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+app.get("/api/mlb/game_scan", async (req, res) => {
+  try {
+    const h2h = await FETCHERS.mlb.h2h({ minHold: null });
+    const totals = await FETCHERS.mlb.totals({ minHold: null });
+    const spreads = await FETCHERS.mlb.spreads({ minHold: null });
+    const teamTotals = await FETCHERS.mlb.team_totals({ minHold: null });
+    const combined = [...(h2h || []), ...(totals || []), ...(spreads || []), ...(teamTotals || [])];
+
+    await handleScanAndAlerts(combined, req);
+    res.json({ h2h, totals, spreads, team_totals: teamTotals });
+  } catch (err) {
+    console.error("game_scan error:", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+/* -------------------- NFL / NCAAF / NBA / NCAAB Routes -------------------- */
+function buildGameScanRoute(sportKey) {
+  app.get(`/api/${sportKey}/game_scan`, async (req, res) => {
+    try {
+      const h2h = await FETCHERS[sportKey].h2h({ minHold: null });
+      const totals = await FETCHERS[sportKey].totals({ minHold: null });
+      const spreads = await FETCHERS[sportKey].spreads({ minHold: null });
+      const combined = [...(h2h || []), ...(totals || []), ...(spreads || [])];
+
+      await handleScanAndAlerts(combined, req);
+      res.json({ h2h, totals, spreads });
+    } catch (err) {
+      console.error(`${sportKey} game_scan error:`, err);
+      res.status(500).json({ error: String(err) });
+    }
+  });
+}
+
+["nfl", "ncaaf", "nba", "ncaab"].forEach(buildGameScanRoute);
 
 /* -------------------- Odds Handler -------------------- */
 async function oddsHandler(req, res) {
@@ -129,119 +164,58 @@ async function oddsHandler(req, res) {
       return res.status(400).json({ error: "unsupported", sport, market });
     }
 
-    const minHold = req.query.minHold !== undefined ? Number(req.query.minHold) : null;
-    const limit   = req.query.limit   !== undefined ? Math.max(1, Number(req.query.limit)) : 10;
-    const compact = String(req.query.compact || "").toLowerCase() === "true";
-
-    let data = await FETCHERS[sport][market]({ minHold });
+    let data = await FETCHERS[sport][market]({ minHold: null });
     if (raw) return res.json(data);
 
     if (!Array.isArray(data)) data = [];
-    if (limit) data = data.slice(0, limit);
-
-    if (compact) {
-      data = data.map((g) => {
-        const best  = g.best || {};
-        return {
-          gameId: g.gameId,
-          time: g.commence_time,
-          home: g.home,
-          away: g.away,
-          market: g.market,
-          hold: typeof g.hold === "number" ? Number(g.hold.toFixed(4)) : null,
-          tickets: g.tickets ?? null,
-          handle: g.handle ?? null,
-          best
-        };
-      });
-    }
-
-    // 🔎 Run Sharp Engine on manual query
-    for (const g of data) {
-      try {
-        const alert = analyzeMarket(g);
-        if (alert) {
-          const pretty = formatSharpAlert(alert);
-          if (pretty) await sendTelegramMessage(pretty);
-          console.log("🔔 Sharp alert generated:", alert.render.title);
-        }
-      } catch (err) {
-        console.error("❌ Sharp engine failed:", err);
-      }
-    }
-
     res.json(data);
   } catch (err) {
     console.error("oddsHandler error:", err);
     res.status(500).json({ error: String(err) });
   }
 }
-
-/* -------------------- Routes -------------------- */
 app.get("/api/:sport/:market", oddsHandler);
 
 /* -------------------- Auto Scanning -------------------- */
-// Every 3 minutes, ET-adjusted
 cron.schedule("*/3 * * * *", async () => {
   const hourET = new Date().toLocaleString("en-US", {
     timeZone: "America/New_York",
     hour: "numeric",
     hour12: false
   });
-
   const hour = Number(hourET);
+
   if (hour < process.env.SCAN_START_HOUR || hour >= process.env.SCAN_STOP_HOUR) return;
 
-  const sports = (process.env.SCAN_SPORTS || "mlb")
-    .split(",")
-    .map((s) => s.trim().toLowerCase());
+  const jobs = [
+    { sport: "mlb", path: "f5_scan" },
+    { sport: "mlb", path: "game_scan" },
+    { sport: "nfl", path: "game_scan" },
+    { sport: "ncaaf", path: "game_scan" },
+    { sport: "nba", path: "game_scan" },
+    { sport: "ncaab", path: "game_scan" }
+  ];
 
-  for (const sport of sports) {
-    const envKey = `SCAN_${sport.toUpperCase()}_MARKETS`;
-    const markets = (process.env[envKey] || "")
-      .split(",")
-      .map((m) => m.trim().toLowerCase())
-      .filter((m) => m);
+  for (const job of jobs) {
+    try {
+      const url = `https://odds-backend-oo4k.onrender.com/api/${job.sport}/${job.path}?telegram=true`;
+      const res = await fetch(url);
+      const data = await res.json();
 
-    for (const market of markets) {
-      try {
-        const url = `https://odds-backend-oo4k.onrender.com/api/${sport}/${market}?telegram=true`;
-        const res = await fetch(url);
-        const data = await res.json();
+      const betCount = Object.values(data)
+        .filter((x) => Array.isArray(x))
+        .reduce((sum, arr) => sum + arr.length, 0);
 
-        const betCount = Object.values(data)
-          .filter((x) => Array.isArray(x))
-          .reduce((sum, arr) => sum + arr.length, 0);
-
-        if (betCount > 0) {
-          console.log(`✅ Auto-scan ran for ${sport} (${market}), found ${betCount} bets`);
-
-          // 🔎 Run sharp engine on auto-scan results
-          for (const key of Object.keys(data)) {
-            if (Array.isArray(data[key])) {
-              for (const g of data[key]) {
-                try {
-                  const alert = analyzeMarket(g);
-                  if (alert) {
-                    const pretty = formatSharpAlert(alert);
-                    if (pretty) await sendTelegramMessage(pretty);
-                    console.log("🔔 Sharp alert generated:", alert.render.title);
-                  }
-                } catch (err) {
-                  console.error("❌ Sharp engine failed:", err);
-                }
-              }
-            }
-          }
-        }
-      } catch (err) {
-        console.error(`❌ Auto-scan failed for ${sport} (${market}):`, err);
+      if (betCount > 0) {
+        console.log(`✅ Auto-scan ran for ${job.sport} (${job.path}), found ${betCount} bets`);
       }
+    } catch (err) {
+      console.error(`❌ Auto-scan failed for ${job.sport} (${job.path}):`, err);
     }
   }
 });
 
-/* -------------------- Daily Summary (Midnight ET) -------------------- */
+/* -------------------- Daily Config Summary -------------------- */
 cron.schedule("0 0 * * *", async () => {
   try {
     const sports = (process.env.SCAN_SPORTS || "mlb")
@@ -249,7 +223,6 @@ cron.schedule("0 0 * * *", async () => {
       .map((s) => s.trim().toLowerCase());
 
     const lines = [];
-
     for (const sport of sports) {
       const envKey = `SCAN_${sport.toUpperCase()}_MARKETS`;
       const markets = (process.env[envKey] || "")
@@ -268,7 +241,6 @@ cron.schedule("0 0 * * *", async () => {
     const dateET = now.toLocaleDateString("en-US", { timeZone: "America/New_York" });
 
     const summary = `📊 *GoSignals Daily Summary* \n📅 ${dateET} (ET)\n\nActive Scans:\n${lines.join("\n")}`;
-
     await sendTelegramMessage(summary);
     console.log("✅ Daily summary sent to Telegram");
   } catch (err) {

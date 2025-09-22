@@ -10,6 +10,11 @@ import { getPropsNormalized } from "../odds_service.js";
 const app = express();
 app.use(cors());
 
+// Manual-scan safety
+const MANUAL_MAX_JOBS = Number(process.env.MANUAL_MAX_JOBS || 1); // max markets per manual scan
+const MANUAL_DEFAULT_LIMIT = Number(process.env.MANUAL_DEFAULT_LIMIT || 5); // cap results per manual scan
+
+
 /* -------------------- Small utils -------------------- */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const nowET = () =>

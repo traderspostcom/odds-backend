@@ -74,8 +74,10 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
     const combined = [...h2hLimited, ...totalsLimited];
 
     if (String(req.query.telegram || "").toLowerCase() === "true" && combined.length > 0) {
-      const message = formatSharpBatch(combined);
-      await sendTelegramMessage(message);
+      const messages = formatSharpBatch(combined);
+      for (const msg of messages) {
+        await sendTelegramMessage(msg);
+      }
     }
 
     res.json({ limit, f5_h2h: h2hLimited, f5_totals: totalsLimited });
@@ -107,8 +109,10 @@ app.get("/api/mlb/game_scan", async (req, res) => {
     const combined = [...h2hLimited, ...totalsLimited, ...spreadsLimited, ...teamTotalsLimited];
 
     if (String(req.query.telegram || "").toLowerCase() === "true" && combined.length > 0) {
-      const message = formatSharpBatch(combined);
-      await sendTelegramMessage(message);
+      const messages = formatSharpBatch(combined);
+      for (const msg of messages) {
+        await sendTelegramMessage(msg);
+      }
     }
 
     res.json({

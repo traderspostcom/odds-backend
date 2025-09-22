@@ -2,18 +2,33 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import cron from "node-cron";
-import { FETCHERS, isOn } from "./fetchers.js";
+
+// Odds fetchers (same as your earlier wiring; we construct FETCHERS below)
+import {
+  // NFL
+  getNFLH2HNormalized, getNFLSpreadsNormalized, getNFLTotalsNormalized,
+  // MLB
+  getMLBH2HNormalized, getMLBSpreadsNormalized, getMLBTotalsNormalized,
+  getMLBF5H2HNormalized, getMLBF5TotalsNormalized,
+  getMLBTeamTotalsNormalized, getMLBAltLinesNormalized,
+  // NBA
+  getNBAH2HNormalized, getNBASpreadsNormalized, getNBATotalsNormalized,
+  // NCAAF
+  getNCAAFH2HNormalized, getNCAAFSpreadsNormalized, getNCAAFTotalsNormalized,
+  // NCAAB
+  getNCAABH2HNormalized, getNCAABSpreadsNormalized, getNCAABTotalsNormalized,
+  // Tennis + Soccer (not used in jobs below, but kept for parity)
+  getTennisH2HNormalized, getSoccerH2HNormalized,
+  // Props
+  getPropsNormalized
+} from "../odds_service.js";
+
 import { analyzeMarket } from "../sharpEngine.js";
 import { sendTelegramMessage } from "../telegram.js";
-import { getPropsNormalized } from "../odds_service.js";
 
+/* -------------------- App setup -------------------- */
 const app = express();
 app.use(cors());
-
-// Manual-scan safety
-const MANUAL_MAX_JOBS = Number(process.env.MANUAL_MAX_JOBS || 1); // max markets per manual scan
-const MANUAL_DEFAULT_LIMIT = Number(process.env.MANUAL_DEFAULT_LIMIT || 5); // cap results per manual scan
-
 
 /* -------------------- Small utils -------------------- */
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -26,14 +41,27 @@ const nowET = () =>
     minute: "2-digit",
   });
 
-/* -------------------- Env knobs -------------------- */
-const SCAN_ENABLED = String(process.env.SCAN_ENABLED ?? "true").toLowerCase() === "true";
-const RATE_LIMIT_MS = Number(process.env.RATE_LIMIT_MS || 600);               // delay between *market* requests
-const RETRY_429_MAX = Number(process.env.RETRY_429_MAX || 2);                 // retries on 429
-const RETRY_BASE_MS = Number(process.env.RETRY_BASE_MS || 500);               // base backoff
+/* -------------------- Env knobs (centralized) -------------------- */
+const SCAN_ENABLED = String(process.env.SCAN_ENABLED ?? "false").toLowerCase() === "true";
+const AUTO_TELEGRAM = String(process.env.AUTO_TELEGRAM ?? "false").toLowerCase() === "true";
+
+const RATE_LIMIT_MS = Number(process.env.RATE_LIMIT_MS || 600);                // delay between *market* calls
+const RETRY_429_MAX = Number(process.env.RETRY_429_MAX || 2);                  // retries on 429
+const RETRY_BASE_MS = Number(process.env.RETRY_BASE_MS || 500);                // backoff base ms
 const CRON_PAUSE_BETWEEN_SPORTS_MS = Number(process.env.CRON_PAUSE_BETWEEN_SPORTS_MS || 1200);
-const CRON_MIN = Number(process.env.SCAN_INTERVAL_MIN || 5);                  // cron every N minutes
+const CRON_MIN = Number(process.env.SCAN_INTERVAL_MIN || 5);                   // cron every N minutes
 const DEFAULT_LIMIT = 15;
+
+// Manual-scan safety clamps
+const MANUAL_MAX_JOBS = Number(process.env.MANUAL_MAX_JOBS || 1);
+const MANUAL_DEFAULT_LIMIT = Number(process.env.MANUAL_DEFAULT_LIMIT || 5);
+
+// Optional global clamp for cron/internal scans (keeps each sport light)
+const MAX_JOBS_PER_SPORT = Number(process.env.MAX_JOBS_PER_SPORT || 2);
+
+/* -------------------- Toggle util -------------------- */
+const isOn = (key, def = false) =>
+  String(process.env[key] ?? (def ? "true" : "false")).toLowerCase() === "true";
 
 /* -------------------- Locks to prevent overlap -------------------- */
 const sportLocks = new Map(); // sport -> boolean
@@ -61,10 +89,13 @@ async function fetchWithRetry(label, fn, args = {}) {
     } catch (err) {
       const msg = String(err?.message || err);
 
+      // Unsupported/422 → skip quietly
       if (msg.includes("INVALID_MARKET") || msg.includes("Markets not supported") || msg.includes("status=422")) {
         console.warn(`⚠️  Skipping unsupported market: ${label}`);
         return [];
       }
+
+      // 429 → backoff + retry (limited attempts)
       if (msg.includes("429") || msg.toLowerCase().includes("too many requests")) {
         if (attempt >= RETRY_429_MAX) {
           console.warn(`⏳ 429 on ${label} — max retries hit, skipping`);
@@ -83,6 +114,7 @@ async function fetchWithRetry(label, fn, args = {}) {
   }
 }
 
+/** Run market jobs sequentially with pacing to avoid bursts */
 async function runSequential(jobs /* [label, fn, args][] */) {
   const out = [];
   for (const [label, fn, args] of jobs) {
@@ -147,47 +179,100 @@ async function sendMaxInfoTelegram(analyzed, autoMode = false) {
   console.log(`📨 Sent ${analyzed.length} alerts @ ${nowET()} ET`);
 }
 
-/* -------------------- Build jobs per sport -------------------- */
+/* -------------------- FETCHERS map (central) -------------------- */
+const FETCHERS = {
+  nfl: {
+    h2h: getNFLH2HNormalized,
+    spreads: getNFLSpreadsNormalized,
+    totals: getNFLTotalsNormalized,
+    // first-half (only use if wired in your odds_service; guarded below)
+    h1_h2h: null,        // set to your function if available
+    h1_spreads: null,
+    h1_totals: null,
+  },
+  mlb: {
+    h2h: getMLBH2HNormalized,
+    spreads: getMLBSpreadsNormalized,
+    totals: getMLBTotalsNormalized,
+    f5_h2h: getMLBF5H2HNormalized,
+    f5_totals: getMLBF5TotalsNormalized,      // heavy / likely off via .env
+    team_totals: getMLBTeamTotalsNormalized,  // often unsupported on plan
+    alt: getMLBAltLinesNormalized,            // often unsupported on plan
+  },
+  nba: {
+    h2h: getNBAH2HNormalized,
+    spreads: getNBASpreadsNormalized,
+    totals: getNBATotalsNormalized,
+  },
+  ncaaf: {
+    h2h: getNCAAFH2HNormalized,
+    spreads: getNCAAFSpreadsNormalized,
+    totals: getNCAAFTotalsNormalized,
+  },
+  ncaab: {
+    h2h: getNCAABH2HNormalized,
+    spreads: getNCAABSpreadsNormalized,
+    totals: getNCAABTotalsNormalized,
+  },
+  tennis: { h2h: getTennisH2HNormalized },
+  soccer: { h2h: getSoccerH2HNormalized },
+};
+
+/* -------------------- Build jobs per sport (honors .env) -------------------- */
 function buildJobsForSport(sport) {
   const jobs = [];
+
   if (sport === "mlb") {
-    if (isOn("ENABLE_MLB_H2H", true))         jobs.push(["MLB H2H",         FETCHERS.mlb.h2h,         { minHold: null }]);
-    if (isOn("ENABLE_MLB_SPREADS", true))     jobs.push(["MLB Spreads",     FETCHERS.mlb.spreads,     { minHold: null }]);
-    if (isOn("ENABLE_MLB_TOTALS", true))      jobs.push(["MLB Totals",      FETCHERS.mlb.totals,      { minHold: null }]);
-    if (isOn("ENABLE_MLB_F5_H2H", true))      jobs.push(["MLB F5 H2H",      FETCHERS.mlb.f5_h2h,      { minHold: null }]);
-    if (isOn("ENABLE_MLB_F5_TOTALS", true))   jobs.push(["MLB F5 Totals",   FETCHERS.mlb.f5_totals,   { minHold: null }]);
-    if (isOn("ENABLE_MLB_TEAM_TOTALS", true)) jobs.push(["MLB Team Totals", FETCHERS.mlb.team_totals, { minHold: null }]);
-    if (isOn("ENABLE_MLB_ALT", true))         jobs.push(["MLB Alt",         FETCHERS.mlb.alt,         { minHold: null }]);
+    if (isOn("ENABLE_MLB_H2H", true))       jobs.push(["MLB H2H",       FETCHERS.mlb.h2h,       { minHold: null }]);
+    if (isOn("ENABLE_MLB_F5_H2H", true))    jobs.push(["MLB F5 H2H",    FETCHERS.mlb.f5_h2h,    { minHold: null }]);
+
+    if (isOn("ENABLE_MLB_SPREADS", false))  jobs.push(["MLB Spreads",   FETCHERS.mlb.spreads,   { minHold: null }]);
+    if (isOn("ENABLE_MLB_TOTALS", false))   jobs.push(["MLB Totals",    FETCHERS.mlb.totals,    { minHold: null }]);
+    if (isOn("ENABLE_MLB_F5_TOTALS", false))jobs.push(["MLB F5 Totals", FETCHERS.mlb.f5_totals, { minHold: null }]);
+    if (isOn("ENABLE_MLB_TEAM_TOTALS", false)) jobs.push(["MLB Team Totals", FETCHERS.mlb.team_totals, { minHold: null }]);
+    if (isOn("ENABLE_MLB_ALT", false))      jobs.push(["MLB Alt",       FETCHERS.mlb.alt,       { minHold: null }]);
   }
+
   if (sport === "nfl") {
-    if (isOn("ENABLE_NFL_H2H", true))     jobs.push(["NFL H2H",     FETCHERS.nfl.h2h,     { minHold: null }]);
-    if (isOn("ENABLE_NFL_SPREADS", true)) jobs.push(["NFL Spreads", FETCHERS.nfl.spreads, { minHold: null }]);
-    if (isOn("ENABLE_NFL_TOTALS", true))  jobs.push(["NFL Totals",  FETCHERS.nfl.totals,  { minHold: null }]);
-    if (isOn("ENABLE_NFL_H1", true)) {
-      if (FETCHERS.nfl.h1_spreads) jobs.push(["NFL 1H Spreads", FETCHERS.nfl.h1_spreads, { minHold: null }]);
-      if (FETCHERS.nfl.h1_totals)  jobs.push(["NFL 1H Totals",  FETCHERS.nfl.h1_totals,  { minHold: null }]);
-      if (FETCHERS.nfl.h1_h2h)     jobs.push(["NFL 1H H2H",     FETCHERS.nfl.h1_h2h,     { minHold: null }]);
-    }
+    if (isOn("ENABLE_NFL_H2H", true))       jobs.push(["NFL H2H",       FETCHERS.nfl.h2h,       { minHold: null }]);
+
+    // 1H ML if available in FETCHERS and enabled
+    if (isOn("ENABLE_NFL_H1", false) && FETCHERS.nfl.h1_h2h)
+      jobs.push(["NFL 1H H2H", FETCHERS.nfl.h1_h2h, { minHold: null }]);
+
+    if (isOn("ENABLE_NFL_SPREADS", false))  jobs.push(["NFL Spreads",   FETCHERS.nfl.spreads,   { minHold: null }]);
+    if (isOn("ENABLE_NFL_TOTALS", false))   jobs.push(["NFL Totals",    FETCHERS.nfl.totals,    { minHold: null }]);
+
+    // If you later wire first-half spreads/totals, guard with isOn & existence:
+    // if (isOn("ENABLE_NFL_H1", false) && FETCHERS.nfl.h1_spreads) jobs.push(["NFL 1H Spreads", FETCHERS.nfl.h1_spreads, { minHold: null }]);
+    // if (isOn("ENABLE_NFL_H1", false) && FETCHERS.nfl.h1_totals)  jobs.push(["NFL 1H Totals",  FETCHERS.nfl.h1_totals,  { minHold: null }]);
   }
+
   if (sport === "nba") {
-    if (isOn("ENABLE_NBA_H2H", true))     jobs.push(["NBA H2H",     FETCHERS.nba.h2h,     { minHold: null }]);
-    if (isOn("ENABLE_NBA_SPREADS", true)) jobs.push(["NBA Spreads", FETCHERS.nba.spreads, { minHold: null }]);
-    if (isOn("ENABLE_NBA_TOTALS", true))  jobs.push(["NBA Totals",  FETCHERS.nba.totals,  { minHold: null }]);
+    if (isOn("ENABLE_NBA_H2H", false))      jobs.push(["NBA H2H",      FETCHERS.nba.h2h,      { minHold: null }]);
+    if (isOn("ENABLE_NBA_SPREADS", false))  jobs.push(["NBA Spreads",  FETCHERS.nba.spreads,  { minHold: null }]);
+    if (isOn("ENABLE_NBA_TOTALS", false))   jobs.push(["NBA Totals",   FETCHERS.nba.totals,   { minHold: null }]);
   }
+
   if (sport === "ncaaf") {
-    if (isOn("ENABLE_NCAAF_H2H", true))     jobs.push(["NCAAF H2H",     FETCHERS.ncaaf.h2h,     { minHold: null }]);
-    if (isOn("ENABLE_NCAAF_SPREADS", true)) jobs.push(["NCAAF Spreads", FETCHERS.ncaaf.spreads, { minHold: null }]);
-    if (isOn("ENABLE_NCAAF_TOTALS", true))  jobs.push(["NCAAF Totals",  FETCHERS.ncaaf.totals,  { minHold: null }]);
+    if (isOn("ENABLE_NCAAF_H2H", false))    jobs.push(["NCAAF H2H",    FETCHERS.ncaaf.h2h,    { minHold: null }]);
+    if (isOn("ENABLE_NCAAF_SPREADS", false))jobs.push(["NCAAF Spreads",FETCHERS.ncaaf.spreads,{ minHold: null }]);
+    if (isOn("ENABLE_NCAAF_TOTALS", false)) jobs.push(["NCAAF Totals", FETCHERS.ncaaf.totals, { minHold: null }]);
   }
+
   if (sport === "ncaab") {
-    if (isOn("ENABLE_NCAAB_H2H", true))     jobs.push(["NCAAB H2H",     FETCHERS.ncaab.h2h,     { minHold: null }]);
-    if (isOn("ENABLE_NCAAB_SPREADS", true)) jobs.push(["NCAAB Spreads", FETCHERS.ncaab.spreads, { minHold: null }]);
-    if (isOn("ENABLE_NCAAB_TOTALS", true))  jobs.push(["NCAAB Totals",  FETCHERS.ncaab.totals,  { minHold: null }]);
+    if (isOn("ENABLE_NCAAB_H2H", false))    jobs.push(["NCAAB H2H",    FETCHERS.ncaab.h2h,    { minHold: null }]);
+    if (isOn("ENABLE_NCAAB_SPREADS", false))jobs.push(["NCAAB Spreads",FETCHERS.ncaab.spreads,{ minHold: null }]);
+    if (isOn("ENABLE_NCAAB_TOTALS", false)) jobs.push(["NCAAB Totals", FETCHERS.ncaab.totals, { minHold: null }]);
   }
+
+  // Global clamp to keep each sport light in cron/internal scans
+  if (jobs.length > MAX_JOBS_PER_SPORT) jobs.splice(MAX_JOBS_PER_SPORT);
+
   return jobs;
 }
 
-/* -------------------- Core scan (internal) -------------------- */
+/* -------------------- Core scan (internal function) -------------------- */
 async function scanSportInternal(sport, { limit = DEFAULT_LIMIT, telegram = false } = {}) {
   if (!FETCHERS[sport]) return { error: "unsupported_sport", sport };
 
@@ -213,28 +298,71 @@ async function scanSportInternal(sport, { limit = DEFAULT_LIMIT, telegram = fals
 /* -------------------- Health -------------------- */
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-/* -------------------- Manual scan API (kept) -------------------- */
+/* -------------------- Manual scan API (SAFE: supports dryrun) -------------------- */
 app.get("/api/scan/:sport", async (req, res) => {
   const sport = String(req.params.sport || "").toLowerCase();
-  const limit = Math.min(15, Math.max(1, Number(req.query.limit ?? DEFAULT_LIMIT)));
-  const wantsTelegram = String(req.query.telegram || "").toLowerCase() === "true";
+  if (!FETCHERS[sport]) return res.status(400).json({ error: "unsupported_sport", sport });
 
-  const result = await scanSportInternal(sport, { limit, telegram: wantsTelegram });
+  const dryrun = String(req.query.dryrun || "false").toLowerCase() === "true";
+  const wantsTelegram = String(req.query.telegram || "").toLowerCase() === "true";
+  // manual safety: clamp limit & jobs
+  let limit = Math.min(MANUAL_DEFAULT_LIMIT, Math.max(1, Number(req.query.limit ?? MANUAL_DEFAULT_LIMIT)));
+
+  const result = await withSportLock(sport, async () => {
+    const jobs = buildJobsForSport(sport);
+    const planned = jobs.slice(0, MANUAL_MAX_JOBS).map(j => j[0]);
+
+    if (dryrun) {
+      return {
+        sport,
+        planned_jobs: planned,
+        note: "dry run (no provider calls)",
+        timestamp_et: nowET(),
+      };
+    }
+
+    // clamp jobs for manual runs
+    if (jobs.length > MANUAL_MAX_JOBS) jobs.splice(MANUAL_MAX_JOBS);
+
+    // execute
+    const flattened = await runSequential(jobs);
+    const limited = flattened.slice(0, limit);
+    const analyzed = limited.map(a => analyzeMarket(a)).filter(Boolean);
+
+    if (wantsTelegram) await sendMaxInfoTelegram(analyzed, false);
+
+    return {
+      sport,
+      limit,
+      pulled: flattened.length,
+      analyzed: analyzed.length,
+      sent_to_telegram: wantsTelegram ? analyzed.length : 0,
+      timestamp_et: nowET(),
+      planned_jobs: planned
+    };
+  });
+
   if (!result) return res.json({ sport, skipped: true, reason: "busy" });
   res.json(result);
 });
 
-/* -------------------- MLB F5 + Full routes (kept) -------------------- */
+/* -------------------- Existing MLB convenience routes (optional) -------------------- */
 app.get("/api/mlb/f5_scan", async (req, res) => {
-  const out = await scanSportInternal("mlb", { limit: Number(req.query.limit ?? 15), telegram: String(req.query.telegram || "").toLowerCase() === "true" });
+  const out = await scanSportInternal("mlb", {
+    limit: Number(req.query.limit ?? MANUAL_DEFAULT_LIMIT),
+    telegram: String(req.query.telegram || "").toLowerCase() === "true"
+  });
   res.json(out);
 });
 app.get("/api/mlb/game_scan", async (req, res) => {
-  const out = await scanSportInternal("mlb", { limit: Number(req.query.limit ?? 15), telegram: String(req.query.telegram || "").toLowerCase() === "true" });
+  const out = await scanSportInternal("mlb", {
+    limit: Number(req.query.limit ?? MANUAL_DEFAULT_LIMIT),
+    telegram: String(req.query.telegram || "").toLowerCase() === "true"
+  });
   res.json(out);
 });
 
-/* -------------------- Generic odds JSON (after scan routes) -------------------- */
+/* -------------------- Generic odds JSON (AFTER scan routes) -------------------- */
 app.get("/api/:sport/:market", async (req, res) => {
   try {
     const sport = String(req.params.sport || "").toLowerCase();
@@ -276,9 +404,10 @@ if (SCAN_ENABLED) {
       if (hour < Number(process.env.SCAN_START_HOUR || 6) || hour >= Number(process.env.SCAN_STOP_HOUR || 24)) return;
 
       const sports = (process.env.SCAN_SPORTS || "mlb").split(",").map(s => s.trim().toLowerCase());
+
       for (const sport of sports) {
         try {
-          const res = await scanSportInternal(sport, { limit: DEFAULT_LIMIT, telegram: true });
+          const res = await scanSportInternal(sport, { limit: DEFAULT_LIMIT, telegram: AUTO_TELEGRAM });
           console.log(`🤖 Auto-scan ${sport}: pulled=${res?.pulled ?? 0} analyzed=${res?.analyzed ?? 0} @ ${res?.timestamp_et ?? nowET()} ET`);
         } catch (err) {
           console.error(`❌ Auto-scan failed for ${sport}:`, err);

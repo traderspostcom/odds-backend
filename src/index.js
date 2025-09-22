@@ -411,9 +411,8 @@ app.get("/api/:sport/:market", async (req, res) => {
 });
 
 /* --------------------------------------------------------------- */
-/*                         AUTO SCANNING                          */
+/* -------------------- Auto Scanning (hardened) -------------------- */
 /* --------------------------------------------------------------- */
-
 cron.schedule("*/3 * * * *", async () => {
   const hourET = new Date().toLocaleString("en-US", {
     timeZone: "America/New_York",
@@ -427,14 +426,37 @@ cron.schedule("*/3 * * * *", async () => {
 
   const sports = (process.env.SCAN_SPORTS || "mlb").split(",").map(s => s.trim().toLowerCase());
   for (const sport of sports) {
+    const url = `https://odds-backend-oo4k.onrender.com/api/scan/${sport}?telegram=true&limit=15`;
     try {
-      const url = `https://odds-backend-oo4k.onrender.com/api/scan/${sport}?telegram=true&limit=15`;
       const res = await fetch(url);
+      const ct = (res.headers.get("content-type") || "").toLowerCase();
+
+      if (!res.ok) {
+        const body = await res.text(); // may be HTML
+        console.warn(`🤖 Auto-scan ${sport}: HTTP ${res.status} (${res.statusText})`);
+        // optional: log a short preview of non-JSON
+        console.warn(body.slice(0, 160));
+        // brief pause between sports to be polite
+        await new Promise(r => setTimeout(r, Number(process.env.CRON_PAUSE_BETWEEN_SPORTS_MS || 800)));
+        continue;
+      }
+
+      if (!ct.includes("application/json")) {
+        const body = await res.text();
+        console.warn(`🤖 Auto-scan ${sport}: Non-JSON response (content-type=${ct || "unknown"})`);
+        console.warn(body.slice(0, 160));
+        await new Promise(r => setTimeout(r, Number(process.env.CRON_PAUSE_BETWEEN_SPORTS_MS || 800)));
+        continue;
+      }
+
       const data = await res.json();
       console.log(`🤖 Auto-scan ${sport}: pulled=${data.pulled} analyzed=${data.analyzed} @ ${data.timestamp_et} ET`);
     } catch (err) {
       console.error(`❌ Auto-scan failed for ${sport}:`, err);
     }
+
+    // brief pause between sports
+    await new Promise(r => setTimeout(r, Number(process.env.CRON_PAUSE_BETWEEN_SPORTS_MS || 800)));
   }
 });
 

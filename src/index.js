@@ -28,13 +28,38 @@ import {
   getPropsNormalized
 } from "../odds_service.js";
 
-import { sendTelegramMessage, formatSharpBatch } from "../telegram.js";
+import { sendTelegramMessage, formatSharpAlert } from "../telegram.js";
 
 const app = express();
 app.use(cors());
 
 /* -------------------- Health -------------------- */
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+/* -------------------- Test Odds Alert -------------------- */
+app.get("/api/test/odds", async (_req, res) => {
+  try {
+    const fakeGame = {
+      gameId: "test123",
+      time: "Jan 19 • 8:00 PM ET",
+      home: "Boston Celtics",
+      away: "Detroit Pistons",
+      market: "spreads",
+      best: {
+        FAV: { book: "DraftKings", point: -4.5, price: -110 },
+        DOG: { book: "DraftKings", point: +4.5, price: -110 }
+      }
+    };
+
+    const message = formatSharpAlert(fakeGame, fakeGame.market);
+    await sendTelegramMessage(message);
+
+    res.json({ ok: true, msg: "Test odds alert sent to Telegram" });
+  } catch (err) {
+    console.error("test/odds error:", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
 
 /* -------------------- Multi-Sport Router -------------------- */
 const FETCHERS = {
@@ -43,8 +68,8 @@ const FETCHERS = {
     h2h: getMLBH2HNormalized, 
     spreads: getMLBSpreadsNormalized, 
     totals: getMLBTotalsNormalized,
-    f5_h2h: getMLBF5H2HNormalized,        // ✅ First 5 Moneyline
-    f5_totals: getMLBF5TotalsNormalized,  // ✅ First 5 Totals
+    f5_h2h: getMLBF5H2HNormalized,
+    f5_totals: getMLBF5TotalsNormalized,
     team_totals: getMLBTeamTotalsNormalized,
     alt: getMLBAltLinesNormalized
   },
@@ -55,83 +80,11 @@ const FETCHERS = {
   soccer:{ h2h: getSoccerH2HNormalized }
 };
 
-/* -------------------- MLB F5 Scan -------------------- */
-app.get("/api/mlb/f5_scan", async (req, res) => {
-  try {
-    let limit = 5;
-    if (String(req.query.telegram || "").toLowerCase() === "true") limit = 15;
-    if (req.query.limit !== undefined) {
-      limit = Math.min(15, Math.max(1, Number(req.query.limit)));
-    }
-
-    const h2h = await FETCHERS.mlb.f5_h2h({ minHold: null });
-    const totals = await FETCHERS.mlb.f5_totals({ minHold: null });
-
-    const h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
-    const totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
-
-    const combined = [...h2hLimited, ...totalsLimited];
-
-    // Send one Telegram message if ?telegram=true
-    if (String(req.query.telegram || "").toLowerCase() === "true" && combined.length > 0) {
-      const message = formatSharpBatch(combined);
-      await sendTelegramMessage(message);
-    }
-
-    res.json({ limit, f5_h2h: h2hLimited, f5_totals: totalsLimited });
-  } catch (err) {
-    console.error("f5_scan error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-/* -------------------- MLB Full Game Scan -------------------- */
-app.get("/api/mlb/game_scan", async (req, res) => {
-  try {
-    let limit = 5;
-    if (String(req.query.telegram || "").toLowerCase() === "true") limit = 15;
-    if (req.query.limit !== undefined) {
-      limit = Math.min(15, Math.max(1, Number(req.query.limit)));
-    }
-
-    const h2h = await FETCHERS.mlb.h2h({ minHold: null });
-    const totals = await FETCHERS.mlb.totals({ minHold: null });
-    const spreads = await FETCHERS.mlb.spreads({ minHold: null });
-    const teamTotals = await FETCHERS.mlb.team_totals({ minHold: null });
-
-    const h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
-    const totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
-    const spreadsLimited = Array.isArray(spreads) ? spreads.slice(0, limit) : [];
-    const teamTotalsLimited = Array.isArray(teamTotals) ? teamTotals.slice(0, limit) : [];
-
-    const combined = [...h2hLimited, ...totalsLimited, ...spreadsLimited, ...teamTotalsLimited];
-
-    // Send one Telegram message if ?telegram=true
-    if (String(req.query.telegram || "").toLowerCase() === "true" && combined.length > 0) {
-      const message = formatSharpBatch(combined);
-      await sendTelegramMessage(message);
-    }
-
-    res.json({
-      limit,
-      game_h2h: h2hLimited,
-      game_totals: totalsLimited,
-      game_spreads: spreadsLimited,
-      game_team_totals: teamTotalsLimited
-    });
-  } catch (err) {
-    console.error("game_scan error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
 /* -------------------- Odds Handler -------------------- */
 async function oddsHandler(req, res) {
   try {
     const sport = String(req.params.sport || "").toLowerCase();
     const market = String(req.params.market || "").toLowerCase();
-
-    const raw = String(req.query.raw || "").toLowerCase() === "true";
 
     if (market.startsWith("prop_")) {
       const marketKey = market.replace("prop_", ""); 
@@ -149,24 +102,19 @@ async function oddsHandler(req, res) {
 
     let data = await FETCHERS[sport][market]({ minHold });
 
-    if (raw) return res.json(data);
-
     if (!Array.isArray(data)) data = [];
     if (limit) data = data.slice(0, limit);
 
     if (compact) {
-      data = data.map((g) => {
-        const best  = g.best || {};
-        return {
-          gameId: g.gameId,
-          time: g.commence_time,
-          home: g.home,
-          away: g.away,
-          market: g.market,
-          hold: typeof g.hold === "number" ? Number(g.hold.toFixed(4)) : null,
-          best
-        };
-      });
+      data = data.map((g) => ({
+        gameId: g.gameId,
+        time: g.commence_time,
+        home: g.home,
+        away: g.away,
+        market: g.market,
+        hold: typeof g.hold === "number" ? Number(g.hold.toFixed(4)) : null,
+        best: g.best || {}
+      }));
     }
 
     res.json(data);

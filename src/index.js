@@ -4,6 +4,8 @@ import cors from "cors";
 import cron from "node-cron";
 import fetch from "node-fetch";
 
+import config from "../config.js";
+
 import {
   // NFL
   getNFLH2HNormalized, getNFLSpreadsNormalized, getNFLTotalsNormalized,
@@ -89,70 +91,69 @@ async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
       const batchMessage = [header, ...formatted].join("\n\n────────────\n\n");
 
       await sendTelegramMessage(batchMessage);
-      console.log(`📨 Sent ${finalAlerts.length} ${modeLabel} alerts in 1 Telegram message @ ${timestamp} ET.`);
+      console.log(`📨 Sent ${finalAlerts.length} ${modeLabel} alerts @ ${timestamp} ET.`);
     }
   } catch (err) {
     console.error("❌ Error sending Telegram alerts:", err);
   }
 }
 
-/* -------------------- MLB Routes -------------------- */
-app.get("/api/mlb/f5_scan", async (req, res) => {
-  try {
-    const h2h = await FETCHERS.mlb.f5_h2h({ minHold: null });
-    const totals = await FETCHERS.mlb.f5_totals({ minHold: null });
-    const combined = [...(h2h || []), ...(totals || [])];
+/* -------------------- Scan Builders -------------------- */
+function buildScanRoute(sportKey, type = "game") {
+  const route = `/api/${sportKey}/${type}_scan`;
 
-    await handleScanAndAlerts(combined, req);
-    res.json({ f5_h2h: h2h, f5_totals: totals });
-  } catch (err) {
-    console.error("f5_scan error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-app.get("/api/mlb/game_scan", async (req, res) => {
-  try {
-    const h2h = await FETCHERS.mlb.h2h({ minHold: null });
-    const totals = await FETCHERS.mlb.totals({ minHold: null });
-    const spreads = await FETCHERS.mlb.spreads({ minHold: null });
-    const teamTotals = await FETCHERS.mlb.team_totals({ minHold: null });
-    const combined = [...(h2h || []), ...(totals || []), ...(spreads || []), ...(teamTotals || [])];
-
-    await handleScanAndAlerts(combined, req);
-    res.json({ h2h, totals, spreads, team_totals: teamTotals });
-  } catch (err) {
-    console.error("game_scan error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-/* -------------------- NFL / NCAAF / NBA / NCAAB Routes -------------------- */
-function buildGameScanRoute(sportKey) {
-  app.get(`/api/${sportKey}/game_scan`, async (req, res) => {
+  app.get(route, async (req, res) => {
     try {
-      const h2h = await FETCHERS[sportKey].h2h({ minHold: null });
-      const totals = await FETCHERS[sportKey].totals({ minHold: null });
-      const spreads = await FETCHERS[sportKey].spreads({ minHold: null });
-      const combined = [...(h2h || []), ...(totals || []), ...(spreads || [])];
+      let markets = [];
 
-      await handleScanAndAlerts(combined, req);
-      res.json({ h2h, totals, spreads });
+      if (sportKey === "mlb" && type === "f5") {
+        markets = [
+          ...(await FETCHERS.mlb.f5_h2h({ minHold: null }) || []),
+          ...(await FETCHERS.mlb.f5_totals({ minHold: null }) || [])
+        ];
+      } else {
+        markets = [
+          ...(await FETCHERS[sportKey].h2h({ minHold: null }) || []),
+          ...(await FETCHERS[sportKey].totals({ minHold: null }) || []),
+          ...(await FETCHERS[sportKey].spreads({ minHold: null }) || [])
+        ];
+      }
+
+      await handleScanAndAlerts(markets, req);
+      res.json({ markets });
     } catch (err) {
-      console.error(`${sportKey} game_scan error:`, err);
+      console.error(`${route} error:`, err);
       res.status(500).json({ error: String(err) });
     }
   });
 }
 
-["nfl", "ncaaf", "nba", "ncaab"].forEach(buildGameScanRoute);
+/* -------------------- Build Routes -------------------- */
+// MLB
+if (config.sports.mlb.f5) buildScanRoute("mlb", "f5");
+if (config.sports.mlb.full) buildScanRoute("mlb", "game");
+
+// NFL
+if (config.sports.nfl.full) buildScanRoute("nfl", "game");
+if (config.sports.nfl.h1)   buildScanRoute("nfl", "h1");
+
+// NCAAF
+if (config.sports.ncaaf.full) buildScanRoute("ncaaf", "game");
+if (config.sports.ncaaf.h1)   buildScanRoute("ncaaf", "h1");
+
+// NBA
+if (config.sports.nba.full) buildScanRoute("nba", "game");
+if (config.sports.nba.h1)   buildScanRoute("nba", "h1");
+
+// NCAAB
+if (config.sports.ncaab.full) buildScanRoute("ncaab", "game");
+if (config.sports.ncaab.h1)   buildScanRoute("ncaab", "h1");
 
 /* -------------------- Odds Handler -------------------- */
 async function oddsHandler(req, res) {
   try {
     const sport = String(req.params.sport || "").toLowerCase();
     const market = String(req.params.market || "").toLowerCase();
-    const raw = String(req.query.raw || "").toLowerCase() === "true";
 
     if (market.startsWith("prop_")) {
       const marketKey = market.replace("prop_", ""); 
@@ -165,9 +166,8 @@ async function oddsHandler(req, res) {
     }
 
     let data = await FETCHERS[sport][market]({ minHold: null });
-    if (raw) return res.json(data);
-
     if (!Array.isArray(data)) data = [];
+
     res.json(data);
   } catch (err) {
     console.error("oddsHandler error:", err);
@@ -177,7 +177,7 @@ async function oddsHandler(req, res) {
 app.get("/api/:sport/:market", oddsHandler);
 
 /* -------------------- Auto Scanning -------------------- */
-cron.schedule("*/3 * * * *", async () => {
+cron.schedule(`*/${config.scan.intervalMinutes} * * * *`, async () => {
   const hourET = new Date().toLocaleString("en-US", {
     timeZone: "America/New_York",
     hour: "numeric",
@@ -185,16 +185,24 @@ cron.schedule("*/3 * * * *", async () => {
   });
   const hour = Number(hourET);
 
-  if (hour < process.env.SCAN_START_HOUR || hour >= process.env.SCAN_STOP_HOUR) return;
+  if (hour < config.scan.startHourET || hour >= config.scan.stopHourET) return;
 
-  const jobs = [
-    { sport: "mlb", path: "f5_scan" },
-    { sport: "mlb", path: "game_scan" },
-    { sport: "nfl", path: "game_scan" },
-    { sport: "ncaaf", path: "game_scan" },
-    { sport: "nba", path: "game_scan" },
-    { sport: "ncaab", path: "game_scan" }
-  ];
+  const jobs = [];
+
+  if (config.sports.mlb.f5)   jobs.push({ sport: "mlb", path: "f5_scan" });
+  if (config.sports.mlb.full) jobs.push({ sport: "mlb", path: "game_scan" });
+
+  if (config.sports.nfl.full) jobs.push({ sport: "nfl", path: "game_scan" });
+  if (config.sports.nfl.h1)   jobs.push({ sport: "nfl", path: "h1_scan" });
+
+  if (config.sports.ncaaf.full) jobs.push({ sport: "ncaaf", path: "game_scan" });
+  if (config.sports.ncaaf.h1)   jobs.push({ sport: "ncaaf", path: "h1_scan" });
+
+  if (config.sports.nba.full) jobs.push({ sport: "nba", path: "game_scan" });
+  if (config.sports.nba.h1)   jobs.push({ sport: "nba", path: "h1_scan" });
+
+  if (config.sports.ncaab.full) jobs.push({ sport: "ncaab", path: "game_scan" });
+  if (config.sports.ncaab.h1)   jobs.push({ sport: "ncaab", path: "h1_scan" });
 
   for (const job of jobs) {
     try {
@@ -218,22 +226,16 @@ cron.schedule("*/3 * * * *", async () => {
 /* -------------------- Daily Config Summary -------------------- */
 cron.schedule("0 0 * * *", async () => {
   try {
-    const sports = (process.env.SCAN_SPORTS || "mlb")
-      .split(",")
-      .map((s) => s.trim().toLowerCase());
-
     const lines = [];
-    for (const sport of sports) {
-      const envKey = `SCAN_${sport.toUpperCase()}_MARKETS`;
-      const markets = (process.env[envKey] || "")
-        .split(",")
-        .map((m) => m.trim().toLowerCase())
-        .filter((m) => m);
 
-      if (markets.length > 0) {
-        lines.push(`- *${sport.toUpperCase()}*: ${markets.join(", ")}`);
-      } else {
-        lines.push(`- *${sport.toUpperCase()}*: (no markets configured)`);
+    for (const [sport, opts] of Object.entries(config.sports)) {
+      const active = [];
+      if (opts.f5) active.push("F5");
+      if (opts.full) active.push("Full");
+      if (opts.h1) active.push("H1");
+
+      if (active.length > 0) {
+        lines.push(`- *${sport.toUpperCase()}*: ${active.join(", ")}`);
       }
     }
 

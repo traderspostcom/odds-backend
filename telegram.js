@@ -5,19 +5,28 @@ import fetch from "node-fetch";
  * Maps API market keys to human-readable short labels
  */
 function mapMarketKey(market) {
-  switch (market.toLowerCase()) {
-    case "h2h":
-    case "h2h_1st_5_innings":
+  // normalize: lowercase + strip underscores, dashes, spaces
+  const norm = market.toLowerCase().replace(/[_\-\s]/g, "");
+
+  switch (true) {
+    case norm === "h2h":
+    case norm === "h2h1st5innings":
       return "ML";
-    case "totals":
-    case "totals_1st_5_innings":
+
+    case norm === "totals":
+    case norm === "totals1st5innings":
       return "TOT";
-    case "spreads":
+
+    case norm === "spreads":
+    case norm === "spreads1st5innings":
       return "SP";
-    case "team_totals":
+
+    case norm === "teamtotals":
+    case norm === "teamtotals1st5innings":
       return "TT";
+
     default:
-      return market.toUpperCase();
+      return market.toUpperCase(); // fallback: show the raw key
   }
 }
 
@@ -70,4 +79,3 @@ export async function sendTelegramMessage(chatId, text) {
     throw new Error(`Telegram API error: ${res.statusText}`);
   }
 }
-

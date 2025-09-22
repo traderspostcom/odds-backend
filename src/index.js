@@ -16,7 +16,7 @@ import {
 
   // NBA
   getNBAH2HNormalized, getNBASpreadsNormalized, getNBATotalsNormalized,
-  getNBAF5H2HNormalized, getNBAF5TotalsNormalized,
+ 
 
   // NCAAF
   getNCAAFH2HNormalized, getNCAAFSpreadsNormalized, getNCAAFTotalsNormalized,

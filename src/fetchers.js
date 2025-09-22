@@ -1,8 +1,13 @@
 // src/fetchers.js
+// Centralized map of all sport/market fetchers + a tiny env-toggle helper.
+
 import * as odds from "../odds_service.js";
 
 /**
- * Env toggle helper — supports 1/true/yes/on (case-insensitive)
+ * Env toggle helper.
+ * Accepts: 1, true, yes, on (case-insensitive) → true
+ *          0, false, no, off → false
+ * Otherwise returns the provided default.
  */
 export const isOn = (key, def = false) => {
   const v = String(process.env[key] ?? "").trim().toLowerCase();
@@ -12,17 +17,19 @@ export const isOn = (key, def = false) => {
 };
 
 /**
- * FETCHERS:
- * Every market is a function returning a normalized array of snapshots.
- * NFL 1H fetchers are optional; if not present in odds_service.js they’ll be undefined.
+ * FETCHERS
+ * Every market function should return an array of normalized snapshots.
+ * NFL 1H fetchers below are optional; if not exported by odds_service.js,
+ * they remain undefined and your calling code should gate/skip them.
  */
 export const FETCHERS = {
   nfl: {
+    // Full game
     h2h:     odds.getNFLH2HNormalized,
     spreads: odds.getNFLSpreadsNormalized,
     totals:  odds.getNFLTotalsNormalized,
 
-    // Optional First Half markets (only used if defined)
+    // First Half (optional; only used if defined upstream)
     h1_h2h:     odds.getNFLH1H2HNormalized,
     h1_spreads: odds.getNFLH1SpreadsNormalized,
     h1_totals:  odds.getNFLH1TotalsNormalized
@@ -32,9 +39,13 @@ export const FETCHERS = {
     h2h:         odds.getMLBH2HNormalized,
     spreads:     odds.getMLBSpreadsNormalized,
     totals:      odds.getMLBTotalsNormalized,
+
+    // First 5
     f5_h2h:      odds.getMLBF5H2HNormalized,
     f5_totals:   odds.getMLBF5TotalsNormalized,
-    team_totals: odds.getMLBTeamTotalsNormalized, // Some regions/endpoints may 422 — your fetch wrapper will skip
+
+    // Extras (availability may vary by region/provider; your safe fetch wrapper will skip on 422)
+    team_totals: odds.getMLBTeamTotalsNormalized,
     alt:         odds.getMLBAltLinesNormalized
   },
 

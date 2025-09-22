@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import cron from "node-cron";
+import { FETCHERS, isOn } from "./fetchers.js";
 
 // Odds fetchers
 import {

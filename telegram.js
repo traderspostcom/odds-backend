@@ -93,6 +93,10 @@ export function formatSharpBatch(games) {
       if (g.best.DOG) msg += `🐶 Dog ${g.best.DOG.point || ""}: *${g.best.DOG.book}* (${g.best.DOG.price})\n`;
     }
 
+    if (typeof g.tickets === "number" && typeof g.handle === "number") {
+      msg += `\n📈 Tickets: ${g.tickets}% | Handle: ${g.handle}%`;
+    }
+
     if (holdText) msg += `\n${holdText}`;
 
     return msg.trim();

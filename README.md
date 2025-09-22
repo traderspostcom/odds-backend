@@ -59,3 +59,45 @@ SCAN_NCAAB_FULL=false
 
 # Sharp profile (choose: sharpest, pro, balanced)
 SHARP_PROFILE=sharpest
+🔧 Controlling Sharp Profiles
+
+The system supports three profiles for different levels of signal strictness:
+
+sharpest 🟢 → Tightest filters (tickets ≤ 40%, handle gap ≥ 15, hold ≤ 2.5%).
+
+pro 🟡 → Medium filters (tickets ≤ 45%, handle gap ≥ 10, hold ≤ 3.5%).
+
+balanced 🟠 → Looser filters (tickets ≤ 50%, handle gap ≥ 8, hold ≤ 5%).
+
+How It Works
+
+In config.js you’ll see:
+
+activeProfile: process.env.SHARP_PROFILE || "sharpest"
+
+
+This means:
+
+The system will read the SHARP_PROFILE variable from your environment.
+
+If you don’t set anything, it defaults to "sharpest".
+
+Setting the Profile
+
+You control the profile in your .env file (project root, same place as package.json).
+Add one of these lines:
+
+SHARP_PROFILE=sharpest
+
+SHARP_PROFILE=pro
+
+SHARP_PROFILE=balanced
+
+
+After updating .env:
+
+Locally → restart your server (npm start).
+
+On Render → add/update the Environment Variable in the Render dashboard and redeploy.
+
+The backend will then apply the thresholds and re-alert rules defined in that profile.

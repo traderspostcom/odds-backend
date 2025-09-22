@@ -1,191 +1,119 @@
-// sharpEngine.js
 import fs from "fs";
-import config from "./config.js";
+import config from "../config.js";
 
+const stateFile = config.profiles[config.activeProfile].stateFile || "./sharp_state.json";
 let state = {};
-if (fs.existsSync(config.stateFile)) {
+
+// Load state on startup
+if (fs.existsSync(stateFile)) {
   try {
-    state = JSON.parse(fs.readFileSync(config.stateFile, "utf-8"));
+    state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
   } catch {
     state = {};
   }
 }
 
+// Persist state to disk
 function saveState() {
-  fs.writeFileSync(config.stateFile, JSON.stringify(state, null, 2));
+  fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
 }
 
 /**
- * Analyze one market snapshot → return structured sharp alert payload or null
+ * Analyze market snapshot and decide if sharp alert should fire
  */
 export function analyzeMarket(snapshot) {
-  const {
-    gameId,
-    sport,
-    league,
-    market,
-    away,
-    home,
-    commence_time,
-    tickets,
-    handle,
-    consensusLine,
-    prevConsensusLine,
-    bookLines
-  } = snapshot;
+  const profile = config.profiles[config.activeProfile];
+  const now = Date.now();
 
-  const signals = [];
+  if (!snapshot || typeof snapshot !== "object") return null;
+
+  const { tickets, handle, market, gameId, home, away, best } = snapshot;
+
+  // -------------------- Handle vs Tickets --------------------
+  if (typeof tickets !== "number" || typeof handle !== "number") return null;
+
+  const gap = handle - tickets;
+  if (tickets > profile.handleTickets.maxTicketsPct) return null;
+  if (handle < profile.handleTickets.minHandlePct) return null;
+  if (gap < profile.handleTickets.minGap) return null;
+
+  // -------------------- Hold Filter --------------------
+  if (snapshot.hold && snapshot.hold > profile.hold.skipAbove) return null;
+
+  // -------------------- Score (very simple demo for now) --------------------
   let score = 0;
+  if (gap >= profile.handleTickets.minGap) score += 2;
+  if (snapshot.hold && snapshot.hold <= profile.hold.max) score += 1;
 
-  /* -------------------- Reverse Line Move -------------------- */
-  if (typeof tickets === "object" && typeof handle === "object") {
-    const homeDiff = (handle.home ?? 0) - (tickets.home ?? 0);
-    const awayDiff = (handle.away ?? 0) - (tickets.away ?? 0);
-    if (Math.max(homeDiff, awayDiff) >= 10) {
-      const side = homeDiff > awayDiff ? "home" : "away";
-      signals.push({
-        code: "RLM",
-        label: "Reverse Line Move",
-        data: {
-          handle_side: side,
-          tickets_pct_home: tickets.home,
-          tickets_pct_away: tickets.away,
-          handle_pct_home: handle.home,
-          handle_pct_away: handle.away
-        },
-        points: config.scoring.RLM
-      });
-      score += config.scoring.RLM;
+  const strength =
+    score >= config.thresholds.strong
+      ? "strong"
+      : score >= config.thresholds.lean
+      ? "lean"
+      : "pass";
+
+  if (strength === "pass") return null;
+
+  // -------------------- State + Re-Alerts --------------------
+  const key = gameId || `${home}-${away}-${market}`;
+  const prev = state[key];
+
+  let type = "initial";
+  if (prev) {
+    const expired = now - prev.ts > profile.reAlerts.expiryHours * 3600 * 1000;
+    if (!expired) {
+      if (snapshot.line && prev.entryLine) {
+        if (snapshot.line === prev.entryLine) {
+          type = "realert";
+        } else if (
+          (snapshot.side === "home" && snapshot.line > prev.entryLine) ||
+          (snapshot.side === "away" && snapshot.line < prev.entryLine)
+        ) {
+          type = "realert_plus";
+        }
+      }
     }
   }
 
-  /* -------------------- STEAM (stub) -------------------- */
-  if (bookLines && bookLines.moves) {
-    if (bookLines.moves.home >= 2) {
-      signals.push({
-        code: "STEAM",
-        label: "Steam",
-        data: { home_moves: bookLines.moves.home, away_moves: bookLines.moves.away },
-        points: config.scoring.STEAM
-      });
-      score += config.scoring.STEAM;
-    }
-  }
+  // -------------------- Save state --------------------
+  state[key] = {
+    ts: now,
+    entryLine: snapshot.line,
+    side: snapshot.side
+  };
+  saveState();
 
-  /* -------------------- Key Number Cross (stub) -------------------- */
-  if (prevConsensusLine && consensusLine) {
-    if (prevConsensusLine === 3 && consensusLine === 2.5) {
-      signals.push({
-        code: "KEYNUM",
-        label: "Key Number Cross",
-        data: { prev_consensus: prevConsensusLine, current_consensus: consensusLine },
-        points: config.scoring.KEYNUM
-      });
-      score += config.scoring.KEYNUM;
-    }
-  }
-
-  /* -------------------- Outlier vs Consensus (stub) -------------------- */
-  if (bookLines && bookLines.outlier) {
-    signals.push({
-      code: "OUTLIER",
-      label: "Outlier vs Consensus",
-      data: { books: [bookLines.outlier] },
-      points: config.scoring.OUTLIER
-    });
-    score += config.scoring.OUTLIER;
-  }
-
-  /* -------------------- Confidence -------------------- */
-  let confidence = "pass";
-  if (score >= config.thresholds.strong) confidence = "strong";
-  else if (score >= config.thresholds.lean) confidence = "lean";
-
-  let sharpSide = null;
-  if (signals.length > 0) {
-    const first = signals[0];
-    sharpSide = first.data.handle_side || "home";
-  }
-
-  const entryLine = prevConsensusLine || consensusLine;
-  const currentLine = consensusLine;
-  let recommendation = { status: "WATCH", reason: "No clear entry logic yet" };
-
-  if (confidence === "strong" && currentLine === entryLine) {
-    recommendation = { status: "BET_NOW", reason: "Sharp entry matched" };
-  } else if (confidence === "strong" && currentLine !== entryLine) {
-    recommendation = { status: "PASS", reason: "Missed key number" };
-  }
-
-  /* -------------------- Build Alert -------------------- */
-  const payload = {
-    type: "initial",
-    priority: confidence === "strong" ? "high" : "medium",
-    sport,
-    league,
+  // -------------------- Build alert payload --------------------
+  return {
+    type,
+    sport: snapshot.sport,
     market,
-    game_id: gameId,
+    game_id: key,
     game: {
       away,
       home,
-      start_time_utc: commence_time,
-      minutes_to_start: Math.floor((new Date(commence_time) - Date.now()) / 60000)
+      start_time_utc: snapshot.commence_time || null
     },
-    books_considered: ["pinnacle", "circa", "cris"],
-    signals,
-    score,
     sharp_side: {
-      side: sharpSide,
-      team: sharpSide === "home" ? home : away,
-      confidence
+      side: snapshot.side,
+      team: snapshot.side === "home" ? home : away,
+      confidence: strength
     },
     lines: {
-      sharp_entry: entryLine,
-      current_consensus: currentLine,
+      sharp_entry: snapshot.line,
+      current_consensus: snapshot.line,
       direction: "flat"
     },
-    recommendation,
-    notes: [],
+    score,
     render: {
-      title: `SHARP ALERT – ${league} ${away} @ ${home}`,
-      emoji: "🚨",
-      strength: confidence === "strong" ? "🟢 Strong" : "🟡 Lean",
-      tags: signals.map((s) => s.code)
+      title: `SHARP ALERT – ${snapshot.sport.toUpperCase()} ${away} @ ${home}`,
+      emoji: type === "initial" ? "🚨" : type === "realert_plus" ? "🟢" : "🔁",
+      strength: strength === "strong" ? "🟢 Strong" : "🟡 Lean",
+      tags: ["H/T Gap"]
     },
-    meta: { version: "1.0.0", generated_at: new Date().toISOString() }
+    meta: {
+      profile: config.activeProfile,
+      generated_at: new Date().toISOString()
+    }
   };
-
-  /* -------------------- Re-Alert State Tracking -------------------- */
-  if (!state[gameId]) {
-    state[gameId] = { entry: entryLine, lastAlert: Date.now() };
-    saveState();
-    return payload;
-  }
-
-  const prev = state[gameId];
-  const minutesSince = (Date.now() - prev.lastAlert) / 60000;
-  if (minutesSince < config.reAlert.cooldownMinutes) {
-    return null; // cooldown
-  }
-
-  if (currentLine === prev.entry) {
-    payload.type = "realert";
-    payload.recommendation = { status: "BET_NOW", reason: "Sharp entry matched again" };
-    state[gameId].lastAlert = Date.now();
-    saveState();
-    return payload;
-  }
-
-  if (
-    (sharpSide === "home" && currentLine > prev.entry) ||
-    (sharpSide === "away" && currentLine < prev.entry)
-  ) {
-    payload.type = "realert_plus";
-    payload.recommendation = { status: "BET_NOW", reason: "Better than sharp entry" };
-    state[gameId].lastAlert = Date.now();
-    saveState();
-    return payload;
-  }
-
-  return null;
 }

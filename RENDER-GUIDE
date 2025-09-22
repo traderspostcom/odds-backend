@@ -1,0 +1,144 @@
+🚀 GoSignals Backend — Render Deployment Guide
+
+This guide walks you through setting up, deploying, and maintaining your GoSignals backend on Render.
+
+1️⃣ Prepare Your Repo
+
+Ensure your project is in a Git repo (git init if starting fresh).
+
+Key files required:
+
+src/index.js (main server file)
+
+odds_service.js (fetchers)
+
+telegram.js
+
+package.json (with start script: "start": "node src/index.js")
+
+.env (not committed, only added to Render settings)
+
+2️⃣ Create a New Render Web Service
+
+Log into Render
+.
+
+Click New + → Web Service.
+
+Connect to your repo (GitHub, GitLab, or Bitbucket).
+
+Configure service:
+
+Environment: Node
+
+Build Command:
+
+npm install
+
+
+Start Command:
+
+npm start
+
+
+Instance type: Starter (or higher if traffic requires it).
+
+3️⃣ Add Environment Variables
+
+In Render → Environment → Environment Variables, add:
+
+# Telegram
+TELEGRAM_BOT_TOKEN=your-bot-token
+TELEGRAM_CHAT_ID=your-chat-id
+
+# Sports to scan
+SCAN_SPORTS=mlb,nfl,nba,ncaaf,ncaab
+
+# Sharp alerts
+SHARPS_ONLY=true
+
+# Scan window (ET, 24h format)
+SCAN_START_HOUR=0
+SCAN_STOP_HOUR=24
+
+# Credits
+CREDITS_MONTHLY_LIMIT=19000
+CREDITS_ALERT_THRESHOLD=97
+
+
+⚠️ Do not commit .env to GitHub — only manage secrets inside Render.
+
+4️⃣ Verify Deployment
+
+Once deployed, open the service URL → https://<your-app>.onrender.com/health
+
+You should see:
+
+{ "ok": true }
+
+5️⃣ Test API Endpoints
+
+MLB First 5 Scan:
+
+GET https://<your-app>.onrender.com/api/mlb/f5_scan?telegram=true
+
+
+MLB Full Game Scan:
+
+GET https://<your-app>.onrender.com/api/mlb/game_scan?telegram=true
+
+
+Generic:
+
+GET https://<your-app>.onrender.com/api/nfl/h2h?compact=true
+
+
+Check Render Logs → confirm Telegram messages are sent.
+
+6️⃣ Background Cron Tasks
+
+Already included in src/index.js:
+
+Every 30s → auto-scan sports from SCAN_SPORTS.
+
+Midnight ET daily → send usage summary.
+
+Midnight ET 1st → reset credits and notify.
+
+These run inside your web service (no extra Render job needed).
+
+7️⃣ Monitoring & Logs
+
+Use Render’s Logs tab to debug issues.
+
+Console logs include:
+
+✅ Auto-scan runs + count
+
+📨 Telegram alerts sent
+
+📊 Credits usage + warnings
+
+🔄 Monthly resets
+
+8️⃣ Redeploys
+
+When you push updates to your repo branch (e.g., main), Render auto-redeploys.
+
+For a manual redeploy:
+
+Go to your Render service → Manual Deploy.
+
+Select Clear cache & deploy if dependencies changed.
+
+9️⃣ Maintenance Tips
+
+Watch monthly credits → 97% alert will hit Telegram.
+
+Scale instance type if logs show CPU/RAM stress.
+
+Rotate Telegram bot token if compromised.
+
+Adjust SCAN_SPORTS as new seasons start.
+
+✅ That’s it — with this setup, your backend auto-scans, filters sharp money, sends alerts, and manages credits on autopilot.

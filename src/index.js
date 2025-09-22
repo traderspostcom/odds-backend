@@ -128,14 +128,35 @@ app.get("/api/mlb/game_scan", async (req, res) => {
 /* -------------------- Telegram Test -------------------- */
 app.get("/api/test/telegram", async (_req, res) => {
   try {
-    const testMessage = "✅ Test message from GoSignal backend! 📊";
-    await sendTelegramMessage(testMessage);
-    res.json({ ok: true, sent: testMessage });
+    const fakeGame = {
+      home: "Boston Celtics",
+      away: "Detroit Pistons",
+      time: "Jan 19 • 8:00 PM ET",
+      market: "totals",
+      best: {
+        O: { book: "DraftKings", point: 228.5, price: -110 },
+        U: { book: "DraftKings", point: 228.5, price: -110 }
+      }
+    };
+
+    const message = `📊 *GoSignals Test Alert*\n\n` +
+      `🕒 ${fakeGame.time}\n` +
+      `⚔️ ${fakeGame.away} @ ${fakeGame.home}\n\n` +
+      `ML: Boston Celtics +160  🏠 DraftKings\n` +
+      `ML: Detroit Pistons -192  🛫 DraftKings\n\n` +
+      `SP: Boston Celtics +4.5 (-110) DraftKings\n` +
+      `SP: Detroit Pistons -4.5 (-110) DraftKings\n\n` +
+      `TOT: O${fakeGame.best.O.point} ${fakeGame.best.O.price} DraftKings | ` +
+      `U${fakeGame.best.U.point} ${fakeGame.best.U.price} DraftKings`;
+
+    await sendTelegramMessage(message);
+    res.json({ ok: true, sent: message });
   } catch (err) {
     console.error("❌ Telegram test failed:", err);
     res.status(500).json({ error: String(err) });
   }
 });
+
 
 /* -------------------- Odds Handler -------------------- */
 async function oddsHandler(req, res) {

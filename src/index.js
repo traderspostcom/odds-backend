@@ -29,7 +29,7 @@ import {
   getPropsNormalized
 } from "../odds_service.js";
 
-import { sendTelegramMessage, formatSharpAlert } from "../telegram.js";
+import { sendTelegramMessage, formatSharpBatch } from "../telegram.js";
 
 const app = express();
 app.use(cors());
@@ -71,11 +71,11 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
     const h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
     const totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
 
-    if (String(req.query.telegram || "").toLowerCase() === "true") {
-      for (const g of [...h2hLimited, ...totalsLimited]) {
-        const message = formatSharpAlert(g, g.market || "f5");
-        await sendTelegramMessage(message);
-      }
+    const combined = [...h2hLimited, ...totalsLimited];
+
+    if (String(req.query.telegram || "").toLowerCase() === "true" && combined.length > 0) {
+      const message = formatSharpBatch(combined);
+      await sendTelegramMessage(message);
     }
 
     res.json({ limit, f5_h2h: h2hLimited, f5_totals: totalsLimited });
@@ -104,11 +104,11 @@ app.get("/api/mlb/game_scan", async (req, res) => {
     const spreadsLimited = Array.isArray(spreads) ? spreads.slice(0, limit) : [];
     const teamTotalsLimited = Array.isArray(teamTotals) ? teamTotals.slice(0, limit) : [];
 
-    if (String(req.query.telegram || "").toLowerCase() === "true") {
-      for (const g of [...h2hLimited, ...totalsLimited, ...spreadsLimited, ...teamTotalsLimited]) {
-        const message = formatSharpAlert(g, g.market || "game");
-        await sendTelegramMessage(message);
-      }
+    const combined = [...h2hLimited, ...totalsLimited, ...spreadsLimited, ...teamTotalsLimited];
+
+    if (String(req.query.telegram || "").toLowerCase() === "true" && combined.length > 0) {
+      const message = formatSharpBatch(combined);
+      await sendTelegramMessage(message);
     }
 
     res.json({
@@ -175,17 +175,8 @@ async function oddsHandler(req, res) {
   }
 }
 
-/* -------------------- Telegram Test -------------------- */
-app.get("/api/test/telegram", async (_req, res) => {
-  try {
-    const message = "✅ Test message from GoSignals backend! 📊";
-    await sendTelegramMessage(message);
-    res.json({ ok: true, sent: message });
-  } catch (err) {
-    console.error("❌ Telegram test failed:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
+/* -------------------- Routes -------------------- */
+app.get("/api/:sport/:market", oddsHandler);
 
 /* -------------------- Auto Scanning -------------------- */
 cron.schedule("*/30 * * * * *", async () => {
@@ -193,23 +184,28 @@ cron.schedule("*/30 * * * * *", async () => {
   const hour = now.getUTCHours() - 4; // crude UTC→ET shift
 
   if (hour < process.env.SCAN_START_HOUR || hour >= process.env.SCAN_STOP_HOUR) {
-    return; // outside scan window
+    return;
   }
 
   const sports = (process.env.SCAN_SPORTS || "mlb").split(",").map(s => s.trim().toLowerCase());
 
   for (const sport of sports) {
     try {
-      const res = await fetch(
-        `https://odds-backend-oo4k.onrender.com/api/${sport}/f5_scan?telegram=true`
-      );
-      console.log(`✅ Auto-scan triggered for ${sport}`);
+      const url = `https://odds-backend-oo4k.onrender.com/api/${sport}/f5_scan?telegram=true`;
+      const res = await fetch(url);
+      const data = await res.json();
+
+      if (!data.f5_h2h?.length && !data.f5_totals?.length) {
+        console.log(`⏸️ No active games for ${sport}, skipping...`);
+        continue;
+      }
+
+      console.log(`✅ Auto-scan ran for ${sport}, found ${data.f5_h2h.length + data.f5_totals.length} bets`);
     } catch (err) {
       console.error(`❌ Auto-scan failed for ${sport}:`, err);
     }
   }
 });
 
-/* -------------------- Start Server -------------------- */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));

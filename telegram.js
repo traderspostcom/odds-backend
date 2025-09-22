@@ -62,8 +62,25 @@ export function formatSharpBatch(games) {
     const marketLabel = mapMarketKey(g.market);
     const holdText = g.hold !== null ? `💰 Hold: ${(g.hold * 100).toFixed(2)}%` : "";
 
+    // Handle game time in ET
+    const gameTime = g.time || g.commence_time || null;
+    let displayTime = "TBD";
+    if (gameTime) {
+      try {
+        const dt = new Date(gameTime);
+        const options = {
+          hour: "numeric",
+          minute: "2-digit",
+          timeZone: "America/New_York"
+        };
+        displayTime = dt.toLocaleTimeString("en-US", options);
+      } catch {
+        displayTime = gameTime; // fallback to raw if parsing fails
+      }
+    }
+
     let msg = `📊 *GoSignals Sharp Alert!*\n\n`;
-    msg += `📅 ${g.time || "TBD"}\n`;
+    msg += `📅 ${displayTime}\n`;
     msg += `⚔️ ${g.away} @ ${g.home}\n\n`;
     msg += `🎯 Market: ${marketLabel}\n\n`;
 

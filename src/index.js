@@ -56,6 +56,23 @@ const FETCHERS = {
   soccer:{ h2h: getSoccerH2HNormalized }
 };
 
+/* -------------------- Helper: Telegram Alerts -------------------- */
+async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
+  try {
+    const shouldSend = autoMode || (req && String(req.query.telegram || "").toLowerCase() === "true");
+
+    if (shouldSend && alerts.length > 0) {
+      const formatted = formatSharpBatch(alerts);
+      for (const msg of formatted) {
+        await sendTelegramMessage(msg);
+      }
+      console.log(`📨 Sent ${formatted.length} Telegram alert(s).`);
+    }
+  } catch (err) {
+    console.error("❌ Error sending Telegram alerts:", err);
+  }
+}
+
 /* -------------------- MLB F5 Scan -------------------- */
 app.get("/api/mlb/f5_scan", async (req, res) => {
   try {
@@ -73,12 +90,7 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
 
     const combined = [...h2hLimited, ...totalsLimited];
 
-    if (String(req.query.telegram || "").toLowerCase() === "true" && combined.length > 0) {
-      const messages = formatSharpBatch(combined);
-      for (const msg of messages) {
-        await sendTelegramMessage(msg);
-      }
-    }
+    await handleScanAndAlerts(combined, req);
 
     res.json({ limit, f5_h2h: h2hLimited, f5_totals: totalsLimited });
   } catch (err) {
@@ -108,12 +120,7 @@ app.get("/api/mlb/game_scan", async (req, res) => {
 
     const combined = [...h2hLimited, ...totalsLimited, ...spreadsLimited, ...teamTotalsLimited];
 
-    if (String(req.query.telegram || "").toLowerCase() === "true" && combined.length > 0) {
-      const messages = formatSharpBatch(combined);
-      for (const msg of messages) {
-        await sendTelegramMessage(msg);
-      }
-    }
+    await handleScanAndAlerts(combined, req);
 
     res.json({
       limit,
@@ -133,7 +140,6 @@ async function oddsHandler(req, res) {
   try {
     const sport = String(req.params.sport || "").toLowerCase();
     const market = String(req.params.market || "").toLowerCase();
-
     const raw = String(req.query.raw || "").toLowerCase() === "true";
 
     if (market.startsWith("prop_")) {

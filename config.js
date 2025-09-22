@@ -1,49 +1,58 @@
 export default {
   /* -------------------- Sharp Scoring Weights -------------------- */
   scoring: {
-    RLM: 2.0,        // Reverse Line Move
-    STEAM: 2.0,      // Steam
-    KEYNUM: 1.5,     // Key Number Cross
-    LATE: 1.5,       // Late Sharp Move
-    OUTLIER: 1.0,    // Outlier vs Consensus
-    SPLIT: 1.0,      // Handle/Ticket Split Reversal
-    CONSENSUS: 1.0   // Public consensus fade
+    RLM: 2.0,
+    STEAM: 2.0,
+    KEYNUM: 1.5,
+    LATE: 1.5,
+    OUTLIER: 1.0,
+    SPLIT: 1.0,
+    CONSENSUS: 1.0
   },
 
   /* -------------------- Sharp Thresholds -------------------- */
   thresholds: {
-    strong: 5.0,  // ≥ 5 = Strong Alert
-    lean: 3.0     // 3–4 = Lean Alert
-    // <3 = PASS
+    strong: 5.0,
+    lean: 3.0
   },
 
   /* -------------------- Sharp Re-Alert Rules -------------------- */
   reAlert: {
-    cooldownMinutes: 20,  // Wait before same game can re-trigger
-    expiryMinutes: 240    // Expire 4h after game start
+    cooldownMinutes: 20,
+    expiryMinutes: 240
   },
 
   /* -------------------- Sharp State Storage -------------------- */
-  stateFile: "./sharp_state.json", // Persist sharp alerts here
+  stateFile: "./sharp_state.json",
 
   /* -------------------- Scan Windows -------------------- */
   scan: {
-    startHourET: Number(process.env.SCAN_START_HOUR || 6),   // default 6 AM ET
-    stopHourET: Number(process.env.SCAN_STOP_HOUR || 24),    // default midnight ET
-    intervalMinutes: Number(process.env.SCAN_INTERVAL || 3)  // default every 3 minutes
+    startHourET: Number(process.env.SCAN_START_HOUR || 6),
+    stopHourET: Number(process.env.SCAN_STOP_HOUR || 24),
+    intervalMinutes: Number(process.env.SCAN_INTERVAL || 3)
   },
 
-/* -------------------- Sports + Market Toggles -------------------- */
-sports: {
-  mlb:   { f5: true, full: true },
-  nfl:   { h1: true, full: true },
-  ncaaf: { h1: true, full: true },
-  nba:   { 
-    h1: process.env.SCAN_NBA_H1 === "true", 
-    full: process.env.SCAN_NBA_FULL === "true" 
-  },
-  ncaab: { 
-    h1: process.env.SCAN_NCAAB_H1 === "true", 
-    full: process.env.SCAN_NCAAB_FULL === "true" 
+  /* -------------------- Sports + Market Toggles -------------------- */
+  sports: {
+    mlb: {
+      f5: process.env.SCAN_MLB_F5 === "true",
+      full: process.env.SCAN_MLB_FULL === "true"
+    },
+    nfl: {
+      h1: process.env.SCAN_NFL_H1 === "true",
+      full: process.env.SCAN_NFL_FULL === "true"
+    },
+    ncaaf: {
+      h1: process.env.SCAN_NCAAF_H1 === "true",
+      full: process.env.SCAN_NCAAF_FULL === "true"
+    },
+    nba: {
+      h1: process.env.SCAN_NBA_H1 === "true",
+      full: process.env.SCAN_NBA_FULL === "true"
+    },
+    ncaab: {
+      h1: process.env.SCAN_NCAAB_H1 === "true",
+      full: process.env.SCAN_NCAAB_FULL === "true"
+    }
   }
 };

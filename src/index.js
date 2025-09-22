@@ -3,6 +3,13 @@ import express from "express";
 import cors from "cors";
 import cron from "node-cron";
 
+const HARD_KILL = process.env.HARD_KILL === 'true';
+app.use((req, res, next) => {
+  if (HARD_KILL) return res.status(503).send('Service paused (HARD_KILL).');
+  next();
+});
+
+
 // Odds fetchers (same as your earlier wiring; we construct FETCHERS below)
 import {
   // NFL

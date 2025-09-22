@@ -3,28 +3,21 @@ import express from "express";
 import cors from "cors";
 import cron from "node-cron";
 
-// Odds normalizers
 import {
   // NFL
   getNFLH2HNormalized, getNFLSpreadsNormalized, getNFLTotalsNormalized,
-
   // MLB
   getMLBH2HNormalized, getMLBSpreadsNormalized, getMLBTotalsNormalized,
   getMLBF5H2HNormalized, getMLBF5TotalsNormalized,
   getMLBTeamTotalsNormalized, getMLBAltLinesNormalized,
-
   // NBA
   getNBAH2HNormalized, getNBASpreadsNormalized, getNBATotalsNormalized,
-
   // NCAAF
   getNCAAFH2HNormalized, getNCAAFSpreadsNormalized, getNCAAFTotalsNormalized,
-
   // NCAAB
   getNCAABH2HNormalized, getNCAABSpreadsNormalized, getNCAABTotalsNormalized,
-
   // Tennis + Soccer
   getTennisH2HNormalized, getSoccerH2HNormalized,
-
   // Props
   getPropsNormalized
 } from "../odds_service.js";
@@ -102,66 +95,6 @@ async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
   }
 }
 
-/* -------------------- MLB F5 Scan -------------------- */
-app.get("/api/mlb/f5_scan", async (req, res) => {
-  try {
-    let limit = 5;
-    if (String(req.query.telegram || "").toLowerCase() === "true") limit = 15;
-    if (req.query.limit !== undefined) {
-      limit = Math.min(15, Math.max(1, Number(req.query.limit)));
-    }
-
-    const h2h = await FETCHERS.mlb.f5_h2h({ minHold: null });
-    const totals = await FETCHERS.mlb.f5_totals({ minHold: null });
-
-    const h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
-    const totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
-
-    const combined = [...h2hLimited, ...totalsLimited];
-    await handleScanAndAlerts(combined, req);
-
-    res.json({ limit, f5_h2h: h2hLimited, f5_totals: totalsLimited });
-  } catch (err) {
-    console.error("f5_scan error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-/* -------------------- MLB Full Game Scan -------------------- */
-app.get("/api/mlb/game_scan", async (req, res) => {
-  try {
-    let limit = 5;
-    if (String(req.query.telegram || "").toLowerCase() === "true") limit = 15;
-    if (req.query.limit !== undefined) {
-      limit = Math.min(15, Math.max(1, Number(req.query.limit)));
-    }
-
-    const h2h = await FETCHERS.mlb.h2h({ minHold: null });
-    const totals = await FETCHERS.mlb.totals({ minHold: null });
-    const spreads = await FETCHERS.mlb.spreads({ minHold: null });
-    const teamTotals = await FETCHERS.mlb.team_totals({ minHold: null });
-
-    const h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
-    const totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
-    const spreadsLimited = Array.isArray(spreads) ? spreads.slice(0, limit) : [];
-    const teamTotalsLimited = Array.isArray(teamTotals) ? teamTotals.slice(0, limit) : [];
-
-    const combined = [...h2hLimited, ...totalsLimited, ...spreadsLimited, ...teamTotalsLimited];
-    await handleScanAndAlerts(combined, req);
-
-    res.json({
-      limit,
-      game_h2h: h2hLimited,
-      game_totals: totalsLimited,
-      game_spreads: spreadsLimited,
-      game_team_totals: teamTotalsLimited
-    });
-  } catch (err) {
-    console.error("game_scan error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
 /* -------------------- Odds Handler -------------------- */
 async function oddsHandler(req, res) {
   try {
@@ -228,28 +161,69 @@ cron.schedule("*/3 * * * *", async () => {
   const hour = Number(hourET);
   if (hour < process.env.SCAN_START_HOUR || hour >= process.env.SCAN_STOP_HOUR) return;
 
-  const jobs = [
-    { sport: "mlb", path: "f5_scan" },   // MLB First 5
-    { sport: "nfl", path: "game_scan" }, // NFL full game
-    { sport: "ncaaf", path: "game_scan"} // NCAAF full game
-  ];
+  const sports = (process.env.SCAN_SPORTS || "mlb")
+    .split(",")
+    .map((s) => s.trim().toLowerCase());
 
-  for (const job of jobs) {
-    try {
-      const url = `https://odds-backend-oo4k.onrender.com/api/${job.sport}/${job.path}?telegram=true`;
-      const res = await fetch(url);
-      const data = await res.json();
+  for (const sport of sports) {
+    const envKey = `SCAN_${sport.toUpperCase()}_MARKETS`;
+    const markets = (process.env[envKey] || "")
+      .split(",")
+      .map((m) => m.trim().toLowerCase())
+      .filter((m) => m);
 
-      const betCount = Object.values(data)
-        .filter((x) => Array.isArray(x))
-        .reduce((sum, arr) => sum + arr.length, 0);
+    for (const market of markets) {
+      try {
+        const url = `https://odds-backend-oo4k.onrender.com/api/${sport}/${market}?telegram=true`;
+        const res = await fetch(url);
+        const data = await res.json();
 
-      if (betCount > 0) {
-        console.log(`✅ Auto-scan ran for ${job.sport}, found ${betCount} bets`);
+        const betCount = Object.values(data)
+          .filter((x) => Array.isArray(x))
+          .reduce((sum, arr) => sum + arr.length, 0);
+
+        if (betCount > 0) {
+          console.log(`✅ Auto-scan ran for ${sport} (${market}), found ${betCount} bets`);
+        }
+      } catch (err) {
+        console.error(`❌ Auto-scan failed for ${sport} (${market}):`, err);
       }
-    } catch (err) {
-      console.error(`❌ Auto-scan failed for ${job.sport}:`, err);
     }
+  }
+});
+
+/* -------------------- Daily Summary (Midnight ET) -------------------- */
+cron.schedule("0 0 * * *", async () => {
+  try {
+    const sports = (process.env.SCAN_SPORTS || "mlb")
+      .split(",")
+      .map((s) => s.trim().toLowerCase());
+
+    const lines = [];
+
+    for (const sport of sports) {
+      const envKey = `SCAN_${sport.toUpperCase()}_MARKETS`;
+      const markets = (process.env[envKey] || "")
+        .split(",")
+        .map((m) => m.trim().toLowerCase())
+        .filter((m) => m);
+
+      if (markets.length > 0) {
+        lines.push(`- *${sport.toUpperCase()}*: ${markets.join(", ")}`);
+      } else {
+        lines.push(`- *${sport.toUpperCase()}*: (no markets configured)`);
+      }
+    }
+
+    const now = new Date();
+    const dateET = now.toLocaleDateString("en-US", { timeZone: "America/New_York" });
+
+    const summary = `📊 *GoSignals Daily Summary* \n📅 ${dateET} (ET)\n\nActive Scans:\n${lines.join("\n")}`;
+
+    await sendTelegramMessage(summary);
+    console.log("✅ Daily summary sent to Telegram");
+  } catch (err) {
+    console.error("❌ Failed to send daily summary:", err);
   }
 });
 

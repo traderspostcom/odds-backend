@@ -1,4 +1,5 @@
 // telegram.js
+import fetch from "node-fetch";
 
 /**
  * Maps API market keys to human-readable short labels
@@ -47,3 +48,26 @@ export function formatSharpBatch(games) {
     return msg;
   });
 }
+
+/**
+ * Send a message to a Telegram chat
+ */
+export async function sendTelegramMessage(chatId, text) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: "Markdown",
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`Telegram API error: ${res.statusText}`);
+  }
+}
+

@@ -31,17 +31,13 @@ app.use(cors());
 /* -------------------- Health -------------------- */
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-/* -------------------- Multi-Sport Router -------------------- */
+/* -------------------- Fetchers -------------------- */
 const FETCHERS = {
   nfl:   { h2h: getNFLH2HNormalized, spreads: getNFLSpreadsNormalized, totals: getNFLTotalsNormalized },
   mlb:   { 
-    h2h: getMLBH2HNormalized, 
-    spreads: getMLBSpreadsNormalized, 
-    totals: getMLBTotalsNormalized,
-    f5_h2h: getMLBF5H2HNormalized,
-    f5_totals: getMLBF5TotalsNormalized,
-    team_totals: getMLBTeamTotalsNormalized,
-    alt: getMLBAltLinesNormalized
+    h2h: getMLBH2HNormalized, spreads: getMLBSpreadsNormalized, totals: getMLBTotalsNormalized,
+    f5_h2h: getMLBF5H2HNormalized, f5_totals: getMLBF5TotalsNormalized,
+    team_totals: getMLBTeamTotalsNormalized, alt: getMLBAltLinesNormalized
   },
   nba:   { h2h: getNBAH2HNormalized, spreads: getNBASpreadsNormalized, totals: getNBATotalsNormalized },
   ncaaf: { h2h: getNCAAFH2HNormalized, spreads: getNCAAFSpreadsNormalized, totals: getNCAAFTotalsNormalized },
@@ -59,7 +55,7 @@ function filterForSharps(games) {
 }
 
 /* -------------------- Telegram Alerts -------------------- */
-async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
+async function handleScanAndAlerts(alerts, req = null, autoMode = false, label = "") {
   try {
     const shouldSend = autoMode || (req && String(req.query.telegram || "").toLowerCase() === "true");
     if (!shouldSend || alerts.length === 0) return;
@@ -85,224 +81,110 @@ async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
         day: "numeric"
       });
 
-      const header = `🔔 *GoSignals Batch Alert*  \n_Mode: ${modeLabel}_  \n⏰ ${timestamp} ET  \nTotal: ${finalAlerts.length}`;
+      const header = `🔔 *GoSignals Batch Alert – ${label}*  \n_Mode: ${modeLabel}_  \n⏰ ${timestamp} ET  \nTotal: ${finalAlerts.length}`;
       const batchMessage = [header, ...formatted].join("\n\n────────────\n\n");
 
       await sendTelegramMessage(batchMessage);
-      console.log(`📨 Sent ${finalAlerts.length} ${modeLabel} alerts in 1 Telegram message @ ${timestamp} ET.`);
+      console.log(`📨 Sent ${finalAlerts.length} ${modeLabel} alerts for ${label} @ ${timestamp} ET.`);
+    } else {
+      console.log(`⏸ No sharp alerts for ${label}`);
     }
   } catch (err) {
     console.error("❌ Error sending Telegram alerts:", err);
   }
 }
 
-/* -------------------- MLB F5 Scan -------------------- */
-app.get("/api/mlb/f5_scan", async (req, res) => {
-  try {
-    const h2h = await FETCHERS.mlb.f5_h2h({ minHold: null });
-    const totals = await FETCHERS.mlb.f5_totals({ minHold: null });
-
-    const combined = [...(h2h || []), ...(totals || [])];
-    await handleScanAndAlerts(combined, req);
-
-    res.json({ f5_h2h: h2h, f5_totals: totals });
-  } catch (err) {
-    console.error("f5_scan error:", err);
-    res.status(500).json({ error: String(err) });
+/* -------------------- Helper: Run Scan -------------------- */
+async function runScan(sport, markets, req = null, autoMode = false, label = "") {
+  let results = [];
+  for (const m of markets) {
+    if (!FETCHERS[sport][m]) continue;
+    const data = await FETCHERS[sport][m]({ minHold: null });
+    if (Array.isArray(data)) results = results.concat(data);
   }
-});
-
-/* -------------------- MLB Full Game Scan -------------------- */
-app.get("/api/mlb/game_scan", async (req, res) => {
-  try {
-    const h2h = await FETCHERS.mlb.h2h({ minHold: null });
-    const totals = await FETCHERS.mlb.totals({ minHold: null });
-    const spreads = await FETCHERS.mlb.spreads({ minHold: null });
-    const teamTotals = await FETCHERS.mlb.team_totals({ minHold: null });
-
-    const combined = [...(h2h || []), ...(totals || []), ...(spreads || []), ...(teamTotals || [])];
-    await handleScanAndAlerts(combined, req);
-
-    res.json({ game_h2h: h2h, game_totals: totals, game_spreads: spreads, game_team_totals: teamTotals });
-  } catch (err) {
-    console.error("game_scan error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-/* -------------------- Stub Routes (NFL/NCAAF/NBA/NCAAB H1) -------------------- */
-app.get("/api/nfl/h1_scan", async (req, res) => {
-  try {
-    const spreads = await FETCHERS.nfl.spreads({ minHold: null });
-    const totals  = await FETCHERS.nfl.totals({ minHold: null });
-    const combined = [...(spreads || []), ...(totals || [])];
-    await handleScanAndAlerts(combined, req);
-    res.json({ spreads, totals });
-  } catch (err) {
-    console.error("nfl h1_scan error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-app.get("/api/ncaaf/h1_scan", async (req, res) => {
-  try {
-    const spreads = await FETCHERS.ncaaf.spreads({ minHold: null });
-    const totals  = await FETCHERS.ncaaf.totals({ minHold: null });
-    const combined = [...(spreads || []), ...(totals || [])];
-    await handleScanAndAlerts(combined, req);
-    res.json({ spreads, totals });
-  } catch (err) {
-    console.error("ncaaf h1_scan error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-app.get("/api/nba/h1_scan", async (req, res) => {
-  try {
-    const spreads = await FETCHERS.nba.spreads({ minHold: null });
-    const totals  = await FETCHERS.nba.totals({ minHold: null });
-    const combined = [...(spreads || []), ...(totals || [])];
-    await handleScanAndAlerts(combined, req);
-    res.json({ spreads, totals });
-  } catch (err) {
-    console.error("nba h1_scan error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-app.get("/api/ncaab/h1_scan", async (req, res) => {
-  try {
-    const spreads = await FETCHERS.ncaab.spreads({ minHold: null });
-    const totals  = await FETCHERS.ncaab.totals({ minHold: null });
-    const combined = [...(spreads || []), ...(totals || [])];
-    await handleScanAndAlerts(combined, req);
-    res.json({ spreads, totals });
-  } catch (err) {
-    console.error("ncaab h1_scan error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-/* -------------------- Odds Handler -------------------- */
-async function oddsHandler(req, res) {
-  try {
-    const sport = String(req.params.sport || "").toLowerCase();
-    const market = String(req.params.market || "").toLowerCase();
-    const raw = String(req.query.raw || "").toLowerCase() === "true";
-
-    if (market.startsWith("prop_")) {
-      const marketKey = market.replace("prop_", ""); 
-      const data = await getPropsNormalized(sport, marketKey, {});
-      return res.json(data);
-    }
-
-    if (!FETCHERS[sport] || !FETCHERS[sport][market]) {
-      return res.status(400).json({ error: "unsupported", sport, market });
-    }
-
-    const minHold = req.query.minHold !== undefined ? Number(req.query.minHold) : null;
-    const limit   = req.query.limit   !== undefined ? Math.max(1, Number(req.query.limit)) : 10;
-    const compact = String(req.query.compact || "").toLowerCase() === "true";
-
-    let data = await FETCHERS[sport][market]({ minHold });
-    if (raw) return res.json(data);
-
-    if (!Array.isArray(data)) data = [];
-    if (limit) data = data.slice(0, limit);
-
-    if (compact) {
-      data = data.map((g) => {
-        const best  = g.best || {};
-        return {
-          gameId: g.gameId,
-          time: g.commence_time,
-          home: g.home,
-          away: g.away,
-          market: g.market,
-          hold: typeof g.hold === "number" ? Number(g.hold.toFixed(4)) : null,
-          tickets: g.tickets ?? null,
-          handle: g.handle ?? null,
-          best
-        };
-      });
-    }
-
-    res.json(data);
-  } catch (err) {
-    console.error("oddsHandler error:", err);
-    res.status(500).json({ error: String(err) });
-  }
+  await handleScanAndAlerts(results, req, autoMode, label);
+  return results;
 }
-app.get("/api/:sport/:market", oddsHandler);
+
+/* -------------------- Stub Routes -------------------- */
+// MLB
+app.get("/api/mlb/f5_scan", (req, res) => runScan("mlb", ["f5_h2h", "f5_totals"], req, false, "MLB F5").then(data => res.json(data)));
+app.get("/api/mlb/full_scan", (req, res) => runScan("mlb", ["h2h","spreads","totals","team_totals","alt"], req, false, "MLB Full").then(data => res.json(data)));
+
+// NFL
+app.get("/api/nfl/h1_scan", (req, res) => runScan("nfl", ["spreads","totals"], req, false, "NFL H1").then(data => res.json(data)));
+app.get("/api/nfl/full_scan", (req, res) => runScan("nfl", ["h2h","spreads","totals"], req, false, "NFL Full").then(data => res.json(data)));
+
+// NCAAF
+app.get("/api/ncaaf/h1_scan", (req, res) => runScan("ncaaf", ["spreads","totals"], req, false, "NCAAF H1").then(data => res.json(data)));
+app.get("/api/ncaaf/full_scan", (req, res) => runScan("ncaaf", ["h2h","spreads","totals"], req, false, "NCAAF Full").then(data => res.json(data)));
+
+// NBA
+app.get("/api/nba/h1_scan", (req, res) => runScan("nba", ["spreads","totals"], req, false, "NBA H1").then(data => res.json(data)));
+app.get("/api/nba/full_scan", (req, res) => runScan("nba", ["h2h","spreads","totals"], req, false, "NBA Full").then(data => res.json(data)));
+
+// NCAAB
+app.get("/api/ncaab/h1_scan", (req, res) => runScan("ncaab", ["spreads","totals"], req, false, "NCAAB H1").then(data => res.json(data)));
+app.get("/api/ncaab/full_scan", (req, res) => runScan("ncaab", ["h2h","spreads","totals"], req, false, "NCAAB Full").then(data => res.json(data)));
+
+// Tennis & Soccer (manual only)
+app.get("/api/tennis/h2h_scan", (req, res) => runScan("tennis", ["h2h"], req, false, "Tennis H2H").then(data => res.json(data)));
+app.get("/api/soccer/h2h_scan", (req, res) => runScan("soccer", ["h2h"], req, false, "Soccer H2H").then(data => res.json(data)));
 
 /* -------------------- Auto Scanning -------------------- */
-cron.schedule("*/3 * * * *", async () => {
+cron.schedule(`*/${process.env.SCAN_INTERVAL || 3} * * * *`, async () => {
   const hourET = new Date().toLocaleString("en-US", {
-    timeZone: "America/New_York",
-    hour: "numeric",
-    hour12: false
+    timeZone: "America/New_York", hour: "numeric", hour12: false
   });
-
   const hour = Number(hourET);
-  if (hour < process.env.SCAN_START_HOUR || hour >= process.env.SCAN_STOP_HOUR) return;
 
-  const sports = (process.env.SCAN_SPORTS || "mlb").split(",").map((s) => s.trim().toLowerCase());
+  if (hour < process.env.SCAN_START_HOUR || hour >= process.env.SCAN_STOP_HOUR) {
+    console.log("⏸ Outside scan window, skipping...");
+    return;
+  }
+
+  const sports = (process.env.SCAN_SPORTS || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
 
   for (const sport of sports) {
-    const envKey = `SCAN_${sport.toUpperCase()}_MARKETS`;
-    const markets = (process.env[envKey] || "")
-      .split(",")
-      .map((m) => m.trim().toLowerCase())
-      .filter((m) => m);
+    if (sport === "mlb") {
+      if (process.env.SCAN_MLB_F5 === "true") await runScan("mlb", ["f5_h2h","f5_totals"], null, true, "MLB F5");
+      else console.log("⏸ MLB F5 scan disabled via env");
 
-    for (const market of markets) {
-      try {
-        const url = `https://odds-backend-oo4k.onrender.com/api/${sport}/${market}?telegram=true`;
-        const res = await fetch(url);
-        const data = await res.json();
-
-        const betCount = Object.values(data)
-          .filter((x) => Array.isArray(x))
-          .reduce((sum, arr) => sum + arr.length, 0);
-
-        if (betCount > 0) {
-          console.log(`✅ Auto-scan ran for ${sport} (${market}), found ${betCount} bets`);
-        }
-      } catch (err) {
-        console.error(`❌ Auto-scan failed for ${sport} (${market}):`, err);
-      }
-    }
-  }
-});
-
-/* -------------------- Daily Summary -------------------- */
-cron.schedule("0 0 * * *", async () => {
-  try {
-    const sports = (process.env.SCAN_SPORTS || "mlb").split(",").map((s) => s.trim().toLowerCase());
-    const lines = [];
-
-    for (const sport of sports) {
-      const envKey = `SCAN_${sport.toUpperCase()}_MARKETS`;
-      const markets = (process.env[envKey] || "")
-        .split(",")
-        .map((m) => m.trim().toLowerCase())
-        .filter((m) => m);
-
-      if (markets.length > 0) {
-        lines.push(`- *${sport.toUpperCase()}*: ${markets.join(", ")}`);
-      } else {
-        lines.push(`- *${sport.toUpperCase()}*: (no markets configured)`);
-      }
+      if (process.env.SCAN_MLB_FULL === "true") await runScan("mlb", ["h2h","spreads","totals","team_totals","alt"], null, true, "MLB Full");
+      else console.log("⏸ MLB Full scan disabled via env");
     }
 
-    const now = new Date();
-    const dateET = now.toLocaleDateString("en-US", { timeZone: "America/New_York" });
+    if (sport === "nfl") {
+      if (process.env.SCAN_NFL_H1 === "true") await runScan("nfl", ["spreads","totals"], null, true, "NFL H1");
+      else console.log("⏸ NFL H1 scan disabled via env");
 
-    const summary = `📊 *GoSignals Daily Summary* \n📅 ${dateET} (ET)\n\nActive Scans:\n${lines.join("\n")}`;
-    await sendTelegramMessage(summary);
-    console.log("✅ Daily summary sent to Telegram");
-  } catch (err) {
-    console.error("❌ Failed to send daily summary:", err);
+      if (process.env.SCAN_NFL_FULL === "true") await runScan("nfl", ["h2h","spreads","totals"], null, true, "NFL Full");
+      else console.log("⏸ NFL Full scan disabled via env");
+    }
+
+    if (sport === "ncaaf") {
+      if (process.env.SCAN_NCAAF_H1 === "true") await runScan("ncaaf", ["spreads","totals"], null, true, "NCAAF H1");
+      else console.log("⏸ NCAAF H1 scan disabled via env");
+
+      if (process.env.SCAN_NCAAF_FULL === "true") await runScan("ncaaf", ["h2h","spreads","totals"], null, true, "NCAAF Full");
+      else console.log("⏸ NCAAF Full scan disabled via env");
+    }
+
+    if (sport === "nba") {
+      if (process.env.SCAN_NBA_H1 === "true") await runScan("nba", ["spreads","totals"], null, true, "NBA H1");
+      else console.log("⏸ NBA H1 scan disabled via env");
+
+      if (process.env.SCAN_NBA_FULL === "true") await runScan("nba", ["h2h","spreads","totals"], null, true, "NBA Full");
+      else console.log("⏸ NBA Full scan disabled via env");
+    }
+
+    if (sport === "ncaab") {
+      if (process.env.SCAN_NCAAB_H1 === "true") await runScan("ncaab", ["spreads","totals"], null, true, "NCAAB H1");
+      else console.log("⏸ NCAAB H1 scan disabled via env");
+
+      if (process.env.SCAN_NCAAB_FULL === "true") await runScan("ncaab", ["h2h","spreads","totals"], null, true, "NCAAB Full");
+      else console.log("⏸ NCAAB Full scan disabled via env");
+    }
   }
 });
 

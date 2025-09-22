@@ -63,10 +63,11 @@ async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
 
     if (shouldSend && alerts.length > 0) {
       const formatted = formatSharpBatch(alerts);
-      for (const msg of formatted) {
-        await sendTelegramMessage(msg);
+      if (formatted.length > 0) {
+        const batchMessage = formatted.join("\n\n────────────\n\n");
+        await sendTelegramMessage(batchMessage);
+        console.log(`📨 Sent ${formatted.length} alerts in 1 Telegram message.`);
       }
-      console.log(`📨 Sent ${formatted.length} Telegram alert(s).`);
     }
   } catch (err) {
     console.error("❌ Error sending Telegram alerts:", err);

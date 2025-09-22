@@ -1,81 +1,83 @@
 // telegram.js
 import fetch from "node-fetch";
 
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
 /**
- * Maps API market keys to human-readable short labels
+ * Send a message to Telegram
  */
-function mapMarketKey(market) {
-  // normalize: lowercase + strip underscores, dashes, spaces
-  const norm = market.toLowerCase().replace(/[_\-\s]/g, "");
+export async function sendTelegramMessage(message) {
+  try {
+    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
 
-  switch (true) {
-    case norm === "h2h":
-    case norm === "h2h1st5innings":
-      return "ML";
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: message,
+        parse_mode: "Markdown"
+      })
+    });
 
-    case norm === "totals":
-    case norm === "totals1st5innings":
-      return "TOT";
-
-    case norm === "spreads":
-    case norm === "spreads1st5innings":
-      return "SP";
-
-    case norm === "teamtotals":
-    case norm === "teamtotals1st5innings":
-      return "TT";
-
-    default:
-      return market.toUpperCase(); // fallback: show the raw key
+    if (!res.ok) {
+      console.error("❌ Telegram send failed:", await res.text());
+    } else {
+      console.log("📨 Telegram alert sent!");
+    }
+  } catch (err) {
+    console.error("❌ Telegram send error:", err);
   }
 }
 
 /**
- * Format a batch of sharp alerts into nice Telegram messages.
+ * Normalize and map API market keys
+ */
+function mapMarketKey(market) {
+  const norm = market.toLowerCase().replace(/[_\-\s]/g, "");
+  switch (true) {
+    case norm === "h2h":
+    case norm === "h2h1st5innings":
+      return "ML";
+    case norm === "totals":
+    case norm === "totals1st5innings":
+      return "TOT";
+    case norm === "spreads":
+    case norm === "spreads1st5innings":
+      return "SP";
+    case norm === "teamtotals":
+    case norm === "teamtotals1st5innings":
+      return "TT";
+    default:
+      return market.toUpperCase();
+  }
+}
+
+/**
+ * Format a batch of sharp alerts into nice Telegram messages
  */
 export function formatSharpBatch(games) {
   return games.map((g) => {
     const marketLabel = mapMarketKey(g.market);
     const holdText = g.hold !== null ? `💰 Hold: ${(g.hold * 100).toFixed(2)}%` : "";
 
-    let msg = `📊 *GoSignals Alert!*\n\n`;
+    let msg = `📊 *GoSignals Sharp Alert!*\n\n`;
     msg += `📅 ${g.time || "TBD"}\n`;
     msg += `⚔️ ${g.away} @ ${g.home}\n\n`;
-    msg += `🎯 Market: ${marketLabel}\n`;
+    msg += `🎯 Market: ${marketLabel}\n\n`;
 
     if (g.best) {
-      if (g.best.home) msg += `🏠 ${g.home}: ${g.best.home.book} (${g.best.home.price})\n`;
-      if (g.best.away) msg += `🛫 ${g.away}: ${g.best.away.book} (${g.best.away.price})\n`;
-      if (g.best.O) msg += `⬆️ Over ${g.best.O.point || ""}: ${g.best.O.book} (${g.best.O.price})\n`;
-      if (g.best.U) msg += `⬇️ Under ${g.best.U.point || ""}: ${g.best.U.book} (${g.best.U.price})\n`;
-      if (g.best.FAV) msg += `⭐ Fav ${g.best.FAV.point || ""}: ${g.best.FAV.book} (${g.best.FAV.price})\n`;
-      if (g.best.DOG) msg += `🐶 Dog ${g.best.DOG.point || ""}: ${g.best.DOG.book} (${g.best.DOG.price})\n`;
+      if (g.best.home) msg += `🏠 ${g.home}: *${g.best.home.book}* (${g.best.home.price})\n`;
+      if (g.best.away) msg += `🛫 ${g.away}: *${g.best.away.book}* (${g.best.away.price})\n`;
+      if (g.best.O) msg += `⬆️ Over ${g.best.O.point || ""}: *${g.best.O.book}* (${g.best.O.price})\n`;
+      if (g.best.U) msg += `⬇️ Under ${g.best.U.point || ""}: *${g.best.U.book}* (${g.best.U.price})\n`;
+      if (g.best.FAV) msg += `⭐ Fav ${g.best.FAV.point || ""}: *${g.best.FAV.book}* (${g.best.FAV.price})\n`;
+      if (g.best.DOG) msg += `🐶 Dog ${g.best.DOG.point || ""}: *${g.best.DOG.book}* (${g.best.DOG.price})\n`;
     }
 
     if (holdText) msg += `\n${holdText}`;
 
-    return msg;
+    return msg.trim();
   });
-}
-
-/**
- * Send a message to a Telegram chat
- */
-export async function sendTelegramMessage(chatId, text) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  const url = `https://api.telegram.org/bot${token}/sendMessage`;
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "Markdown",
-    }),
-  });
-
-  if (!res.ok) {
-    throw new Error(`Telegram API error: ${res.statusText}`);
-  }
 }

@@ -26,10 +26,9 @@ import {
 
   // Generic props
   getPropsNormalized
-} from "../odds_service.js";   // ✅ odds_service.js is in root
+} from "../odds_service.js";
 
-// 🟢 Telegram helpers
-import { sendTelegramMessage, formatSharpAlert } from "../telegram.js";
+import { sendTelegramMessage, formatSharpBatch } from "../telegram.js";
 
 const app = express();
 app.use(cors());
@@ -68,19 +67,18 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
     const h2h = await FETCHERS.mlb.f5_h2h({ minHold: null });
     const totals = await FETCHERS.mlb.f5_totals({ minHold: null });
 
-    let h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
-    let totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
+    const h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
+    const totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
 
-    const compactMap = (g) => ({
-      gameId: g.gameId,
-      time: g.commence_time,
-      home: g.home,
-      away: g.away,
-      market: g.market,
-      best: g.best || {},
-    });
+    const combined = [...h2hLimited, ...totalsLimited];
 
-    res.json({ limit, f5_h2h: h2hLimited.map(compactMap), f5_totals: totalsLimited.map(compactMap) });
+    // Send one Telegram message if ?telegram=true
+    if (String(req.query.telegram || "").toLowerCase() === "true" && combined.length > 0) {
+      const message = formatSharpBatch(combined);
+      await sendTelegramMessage(message);
+    }
+
+    res.json({ limit, f5_h2h: h2hLimited, f5_totals: totalsLimited });
   } catch (err) {
     console.error("f5_scan error:", err);
     res.status(500).json({ error: String(err) });
@@ -101,53 +99,28 @@ app.get("/api/mlb/game_scan", async (req, res) => {
     const spreads = await FETCHERS.mlb.spreads({ minHold: null });
     const teamTotals = await FETCHERS.mlb.team_totals({ minHold: null });
 
-    let h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
-    let totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
-    let spreadsLimited = Array.isArray(spreads) ? spreads.slice(0, limit) : [];
-    let teamTotalsLimited = Array.isArray(teamTotals) ? teamTotals.slice(0, limit) : [];
+    const h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
+    const totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
+    const spreadsLimited = Array.isArray(spreads) ? spreads.slice(0, limit) : [];
+    const teamTotalsLimited = Array.isArray(teamTotals) ? teamTotals.slice(0, limit) : [];
 
-    const compactMap = (g) => ({
-      gameId: g.gameId,
-      time: g.commence_time,
-      home: g.home,
-      away: g.away,
-      market: g.market,
-      best: g.best || {},
-    });
+    const combined = [...h2hLimited, ...totalsLimited, ...spreadsLimited, ...teamTotalsLimited];
+
+    // Send one Telegram message if ?telegram=true
+    if (String(req.query.telegram || "").toLowerCase() === "true" && combined.length > 0) {
+      const message = formatSharpBatch(combined);
+      await sendTelegramMessage(message);
+    }
 
     res.json({
       limit,
-      game_h2h: h2hLimited.map(compactMap),
-      game_totals: totalsLimited.map(compactMap),
-      game_spreads: spreadsLimited.map(compactMap),
-      game_team_totals: teamTotalsLimited.map(compactMap)
+      game_h2h: h2hLimited,
+      game_totals: totalsLimited,
+      game_spreads: spreadsLimited,
+      game_team_totals: teamTotalsLimited
     });
   } catch (err) {
     console.error("game_scan error:", err);
-    res.status(500).json({ error: String(err) });
-  }
-});
-
-/* -------------------- Test Telegram Route -------------------- */
-app.get("/test-telegram", async (_req, res) => {
-  try {
-    const fakeGame = {
-      time: "Jan 19 • 8:00 PM ET",
-      home: "Boston Celtics",
-      away: "Detroit Pistons",
-      market: "f5_h2h",
-      best: {
-        home: { book: "DraftKings", price: -192 },
-        away: { book: "DraftKings", price: 160 }
-      }
-    };
-
-    const message = formatSharpAlert(fakeGame, "ML");
-    await sendTelegramMessage(message);
-
-    res.json({ ok: true, sent: message });
-  } catch (err) {
-    console.error("Telegram test error:", err);
     res.status(500).json({ error: String(err) });
   }
 });
@@ -158,7 +131,7 @@ async function oddsHandler(req, res) {
     const sport = String(req.params.sport || "").toLowerCase();
     const market = String(req.params.market || "").toLowerCase();
 
-    const raw = String(req.query.raw || "").toLowerCase() === "true"; // 🔑 Debug flag
+    const raw = String(req.query.raw || "").toLowerCase() === "true";
 
     if (market.startsWith("prop_")) {
       const marketKey = market.replace("prop_", ""); 
@@ -202,6 +175,13 @@ async function oddsHandler(req, res) {
     res.status(500).json({ error: String(err) });
   }
 }
+
+/* -------------------- Routes -------------------- */
+app.get("/api/:sport/:market", oddsHandler);
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+
 
 /* -------------------- Routes -------------------- */
 app.get("/api/:sport/:market", oddsHandler);

@@ -22,8 +22,9 @@ import {
   getPropsNormalized
 } from "../odds_service.js";
 
-import { sendTelegramMessage, formatSharpBatch } from "../telegram.js";
+import { sendTelegramMessage } from "../telegram.js";
 import { analyzeMarket } from "../sharpEngine.js";
+import { formatSharpBatchV2 } from "../sharpFormatter.js";
 
 const app = express();
 app.use(cors());
@@ -31,7 +32,7 @@ app.use(cors());
 /* -------------------- Health -------------------- */
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-/* -------------------- Multi-Sport Router -------------------- */
+/* -------------------- Fetchers per sport -------------------- */
 const FETCHERS = {
   nfl:   { h2h: getNFLH2HNormalized, spreads: getNFLSpreadsNormalized, totals: getNFLTotalsNormalized },
   mlb:   { 
@@ -50,29 +51,113 @@ const FETCHERS = {
   soccer:{ h2h: getSoccerH2HNormalized }
 };
 
+/* -------------------- Formatter adapter -------------------- */
+/** Map your current analyzeMarket() payload into the V2 card shape.
+ *  This lets us upgrade Telegram formatting WITHOUT touching sharpEngine yet.
+ *  Missing fields gracefully render as “—”.
+ */
+function toCardShape(a) {
+  if (!a) return null;
+
+  // market mapping (best-effort)
+  const marketType = mapMarketType(a.market);
+
+  // badge tier from your render.strength or basic score
+  const tier = (a?.render?.strength || "").toLowerCase().includes("strong")
+    ? "strong"
+    : "lean";
+
+  // alert kind mapping
+  let alertKind = "initial";
+  if (a?.type === "realert") alertKind = "reentry";
+  if (a?.type === "realert_plus") alertKind = "improved";
+
+  // build normalized card object
+  return {
+    id: a.game_id || a.id || `${a?.game?.away}-${a?.game?.home}-${marketType}`,
+
+    sport: (a.sport || "").toUpperCase(),
+    league: a.league || a.sport || "",
+    marketType,
+    matchup: a.game ? `${a.game.away} @ ${a.game.home}` : undefined,
+    game: {
+      home: a?.game?.home,
+      away: a?.game?.away,
+      start_time_utc: a?.game?.start_time_utc || null
+    },
+
+    side: {
+      team: a?.sharp_side?.team || null,
+      entryPrice: a?.lines?.sharp_entry ?? null,
+      atOrBetter: true,                            // default for now
+      fairPrice: undefined,                        // add later in sharpEngine (optional)
+      consensusPrice: a?.lines?.current_consensus ?? null
+    },
+
+    lineMove: {
+      open: undefined,                             // add later if available
+      current: a?.lines?.current_consensus ?? null,
+      delta: undefined
+    },
+
+    consensus: a?.consensus ? {
+      ticketsPct: a.consensus.ticketsPct,
+      handlePct:  a.consensus.handlePct,
+      gapPct:     a.consensus.gapPct
+    } : undefined,                                  // we’ll fill this in Step 2
+
+    holdPct: a?.holdPct ?? undefined,              // we’ll fill this in Step 2
+
+    score: { total: Number(a?.score ?? 0), tier },
+
+    signals: Array.isArray(a?.signals) ? a.signals : [], // we’ll add structured signals in Step 2
+    keyNumber: a?.keyNumber || { note: null },
+
+    books: Array.isArray(a?.books) ? a.books : [], // optional list of { book, price }
+
+    alertKind,
+    cooldownMins: undefined,
+    profile: a?.meta?.profile || process.env.SHARP_PROFILE || "sharpest"
+  };
+}
+
+function mapMarketType(mkt) {
+  if (!mkt) return "H2H";
+  const s = String(mkt).toLowerCase();
+  if (s.includes("spread")) return "Spread";
+  if (s.includes("total") && s.includes("team")) return "Team Total";
+  if (s.includes("total")) return "Total";
+  if (s.includes("f5") && s.includes("h2h")) return "F5 H2H";
+  if (s.includes("f5") && s.includes("total")) return "F5 Total";
+  return "H2H";
+}
+
 /* -------------------- Telegram Alerts -------------------- */
 async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
   try {
-    const shouldSend = autoMode || (req && String(req.query.telegram || "").toLowerCase() === "true");
-    if (!shouldSend || alerts.length === 0) return;
+    const shouldSend =
+      autoMode || (req && String(req.query.telegram || "").toLowerCase() === "true");
+    if (!shouldSend || !Array.isArray(alerts) || alerts.length === 0) return;
 
-    const formatted = formatSharpBatch(alerts);
+    // Normalize alerts for V2 card format
+    const cards = alerts.map(toCardShape).filter(Boolean);
 
-    const now = new Date();
-    const timestamp = now.toLocaleString("en-US", {
-      timeZone: "America/New_York",
-      hour: "numeric",
-      minute: "2-digit",
-      second: "2-digit",
-      month: "short",
-      day: "numeric"
+    // Credits (optional)
+    const credits = process.env.CREDITS_MONTHLY_LIMIT
+      ? {
+          used: Number(process.env.CREDITS_USED || 0),
+          limit: Number(process.env.CREDITS_MONTHLY_LIMIT)
+        }
+      : null;
+
+    const formatted = formatSharpBatchV2(cards, {
+      mode: (process.env.SHARP_PROFILE || "sharpest").toUpperCase(),
+      auto: Boolean(autoMode),
+      credits,
+      now: new Date()
     });
 
-    const header = `🔔 *GoSignals Batch Alert*  \n⏰ ${timestamp} ET  \nTotal: ${alerts.length}`;
-    const batchMessage = [header, ...formatted].join("\n\n────────────\n\n");
-
-    await sendTelegramMessage(batchMessage);
-    console.log(`📨 Sent ${alerts.length} alerts in 1 Telegram message @ ${timestamp} ET.`);
+    await sendTelegramMessage(formatted);
   } catch (err) {
     console.error("❌ Error sending Telegram alerts:", err);
   }
@@ -95,7 +180,7 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
       ...(Array.isArray(totals) ? totals.slice(0, limit) : [])
     ];
 
-    // 🔎 Run through sharp engine
+    // 🔎 Run through sharp engine (kept as-is)
     const analyzed = combined.map(a => analyzeMarket(a)).filter(a => a !== null);
 
     await handleScanAndAlerts(analyzed, req);
@@ -127,7 +212,6 @@ app.get("/api/mlb/game_scan", async (req, res) => {
       ...(Array.isArray(teamTotals) ? teamTotals.slice(0, limit) : [])
     ];
 
-    // 🔎 Run through sharp engine
     const analyzed = combined.map(a => analyzeMarket(a)).filter(a => a !== null);
 
     await handleScanAndAlerts(analyzed, req);
@@ -138,7 +222,7 @@ app.get("/api/mlb/game_scan", async (req, res) => {
   }
 });
 
-/* -------------------- Odds Handler -------------------- */
+/* -------------------- Generic Odds Handler -------------------- */
 async function oddsHandler(req, res) {
   try {
     const sport = String(req.params.sport || "").toLowerCase();
@@ -158,12 +242,13 @@ async function oddsHandler(req, res) {
     let data = await FETCHERS[sport][market]({ minHold: null });
     if (raw) return res.json(data);
 
-    // 🔎 Analyze sharp signals
     const analyzed = Array.isArray(data)
       ? data.map(a => analyzeMarket(a)).filter(a => a !== null)
       : [];
 
-    res.json(analyzed);
+    // Return normalized cards when hitting the JSON API (handy for debugging)
+    const cards = analyzed.map(toCardShape).filter(Boolean);
+    res.json(cards);
   } catch (err) {
     console.error("oddsHandler error:", err);
     res.status(500).json({ error: String(err) });
@@ -171,7 +256,7 @@ async function oddsHandler(req, res) {
 }
 app.get("/api/:sport/:market", oddsHandler);
 
-/* -------------------- Auto Scanning -------------------- */
+/* -------------------- Auto Scanning (kept same cadence) -------------------- */
 cron.schedule("*/3 * * * *", async () => {
   const hourET = new Date().toLocaleString("en-US", {
     timeZone: "America/New_York",
@@ -185,6 +270,7 @@ cron.schedule("*/3 * * * *", async () => {
   const sports = (process.env.SCAN_SPORTS || "mlb").split(",").map(s => s.trim().toLowerCase());
   for (const sport of sports) {
     try {
+      // NOTE: MLB has the f5_scan route; other sports may 404 — that’s fine for now.
       const url = `https://odds-backend-oo4k.onrender.com/api/${sport}/f5_scan?telegram=true`;
       const res = await fetch(url);
       const data = await res.json();

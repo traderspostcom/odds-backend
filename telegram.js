@@ -32,23 +32,23 @@ export async function sendTelegramMessage(message) {
 }
 
 /**
- * Normalize and map API market keys
+ * Normalize and map API market keys to human labels
  */
 function mapMarketKey(market) {
   const norm = market.toLowerCase().replace(/[_\-\s]/g, "");
   switch (true) {
     case norm === "h2h":
     case norm === "h2h1st5innings":
-      return "ML";
+      return "Moneyline (ML)";
     case norm === "totals":
     case norm === "totals1st5innings":
-      return "TOT";
+      return "Totals (Over/Under)";
     case norm === "spreads":
     case norm === "spreads1st5innings":
-      return "SP";
+      return "Spread (SP)";
     case norm === "teamtotals":
     case norm === "teamtotals1st5innings":
-      return "TT";
+      return "Team Totals (TT)";
     default:
       return market.toUpperCase();
   }

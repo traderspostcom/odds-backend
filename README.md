@@ -1,147 +1,160 @@
-📊 Odds Backend API
+📊 GoSignals Backend
 
-A Node.js backend that fetches odds from The Odds API
- and normalizes them into moneyline (H2H), spreads, and totals (Over/Under) markets for multiple sports.
+Backend service for scanning betting markets, detecting sharp action, and sending Telegram alerts. Deployed on Render.
 
-Currently deployed at:
-👉 https://odds-backend-oo4k.onrender.com
+🚀 Features
+
+Sports Supported
+
+MLB: Full game + First 5 (H2H, Totals, Spreads, Team Totals)
+
+NFL, NBA, NCAAF, NCAAB: H2H, Totals, Spreads
+
+Tennis & Soccer: H2H only
+
+Sharp Detection
+
+Alerts only when tickets% ≤ 40% and handle% ≥ tickets% + 10% (configurable via .env)
+
+Toggle sharp-only mode via SHARPS_ONLY=true/false
+
+Telegram Alerts
+
+Bot: @gosignals_bot
+
+Batched alerts (1 Telegram message per scan)
+
+Header shows mode (ALL/SHARPS_ONLY), ET timestamp, and total count
+
+Automation
+
+Cron auto-scans every 30s (during configured hours)
+
+Directly calls fetchers (faster + saves API credits)
+
+Credits Management
+
+Track monthly API credits used vs. CREDITS_MONTHLY_LIMIT
+
+🚨 Telegram + console warning at 97% usage
+
+📅 Daily usage summary at midnight ET
+
+🔄 Automatic monthly reset at midnight ET on the 1st
 
 ⚙️ Setup
+1. Environment Variables (.env)
+# Telegram
+TELEGRAM_BOT_TOKEN=your-bot-token
+TELEGRAM_CHAT_ID=your-chat-id
 
-Clone repo
+# Sports to scan (comma separated)
+SCAN_SPORTS=mlb,nfl,nba,ncaaf,ncaab
 
-git clone https://github.com/YOUR_GITHUB/odds-backend.git
-cd odds-backend
+# Sharp settings
+SHARPS_ONLY=true       # true = only sharp alerts, false = all alerts
 
+# Scan window (24h format, Eastern Time)
+SCAN_START_HOUR=0      # midnight ET
+SCAN_STOP_HOUR=24      # 11:59 PM ET
 
-Install dependencies
+# Credits
+CREDITS_MONTHLY_LIMIT=19000
+CREDITS_ALERT_THRESHOLD=97   # percent
 
-npm install
+2. Endpoints
 
-
-Set up environment variables in .env:
-
-PORT=3000
-ODDS_API_KEY=your_odds_api_key_here
-ALLOWED_BOOKS=betmgm,caesars,draftkings,fanduel,fanatics,espnbet
-CACHE_TTL_SECONDS=30
-
-
-Start server
-
-npm start
-
-✅ Health Check
+Health check
 GET /health
 
+MLB First 5 scan
+GET /api/mlb/f5_scan?telegram=true
 
-Response:
+MLB full game scan
+GET /api/mlb/game_scan?telegram=true
 
-{ "ok": true }
+Generic odds fetcher
+GET /api/:sport/:market
 
-🏈 Supported Sports + Markets
+Supports query params:
 
-NFL: h2h, spreads, totals
+limit=10
 
-MLB: h2h, spreads, totals
+telegram=true
 
-NBA: h2h, spreads, totals
+compact=true
 
-NCAAF: h2h, spreads, totals
+raw=true
 
-NCAAB: h2h, spreads, totals
+3. Automation
 
-Tennis (ATP): h2h
+Runs every 30s (cron.schedule("*/30 * * * * *"))
 
-Soccer (MLS): h2h
+Scans all sports in SCAN_SPORTS
 
-📡 Endpoints
-🔹 General Format
-/api/:sport/:market?compact=true&limit=10&minHold=0.05
+Sends batched Telegram alerts if sharp action is detected
 
-🔹 Examples
-NFL Moneyline (H2H)
-GET /api/nfl/h2h?compact=true&limit=10
+4. Credit Tracking
 
-NBA Spreads
-GET /api/nba/spreads?limit=5
+Every fetch increments credit usage (trackCredits())
 
-MLB Totals (Over/Under)
-GET /api/mlb/totals?compact=true
+Daily midnight ET → sends usage summary
 
-⚙️ Query Parameters
+1st of month midnight ET → resets credits and sends reset confirmation
 
-limit → number of games to return (default = 10)
+Alert when usage ≥ threshold (CREDITS_ALERT_THRESHOLD, default 97%)
 
-compact=true → simplified JSON response (smaller & easier for bots)
+📲 Telegram Alerts
+Batch Alert Example
+🔔 GoSignals Batch Alert
+Mode: SHARPS_ONLY
+⏰ Sep 23, 7:05:30 PM ET
+Total: 3
 
-minHold=0.05 → filter out games with market hold greater than 5%
+────────────
 
-📦 Example Response (compact=true)
-[
-  {
-    "gameId": "e45f6a|KC Chiefs|BUF Bills",
-    "time": "2025-09-20T20:00:00Z",
-    "home": "KC Chiefs",
-    "away": "BUF Bills",
-    "market": "h2h",
-    "hold": 0.032,
-    "best": {
-      "sideA": { "book": "DraftKings", "price": -110 },
-      "sideB": { "book": "FanDuel", "price": +105 }
-    }
-  }
-]
+📊 GoSignals Sharp Alert!
 
-🚨 Logging
+📅 7:05 PM ET
+⚔️ Yankees @ Red Sox
 
-Every request is logged:
+🎯 Market: ML
 
-GET /api/nfl/h2h?compact=true
+🏠 Red Sox: DraftKings (-120)
+🛫 Yankees: FanDuel (+110)
 
+📈 Tickets: 28% | Handle: 52%
+⚡ Gap: +24%
 
-Failures log error messages in server console.
+Daily Summary Example
+📅 Daily Usage Summary
 
-⚠️ Error Handling
+Date: Sep 25, 12:00 AM ET
 
-Examples:
+📊 Today: 645 credits
+📊 Month: 14,955/19,000 (78.7%)
 
-{ "error": "unsupported", "sport": "rugby", "market": "totals" }
+Monthly Reset Example
+📅 Daily Usage Summary
 
-{ "error": "Odds API unavailable. Try again later." }
+Date: Oct 1, 12:00 AM ET
 
-🔮 Roadmap
+📊 Today: 480 credits
+📊 Month: 18,530/19,000 (97.5%)
 
- Telegram alerts integration
+🔄 Monthly Reset Performed
+Credits counter reset to 0/19000
 
- Add more sports/leagues (EPL, WTA tennis, etc.)
+🛠️ Developer Notes
 
- Web dashboard for monitoring
+Batch alert formatting: telegram.js → formatSharpBatch()
 
- git add .
-git commit -m "Trigger redeploy"
-git push origin main
+Credit tracking: src/index.js → trackCredits()
 
-## 🔔 Testing Telegram Alerts
+Alerts are only sent if:
 
-You can manually trigger a test message to your Telegram bot without waiting for real odds data.
+?telegram=true query param is present, OR
 
-1. Make sure your Render service is running.
-2. Visit this URL in your browser:
+Called via cron auto-scan
 
-https://odds-backend-oo4k.onrender.com/api/test/odds
-
-yaml
-Copy code
-
-3. You should immediately see a formatted test alert (Celtics vs Pistons) appear in your `@gosignals_bot` chat.
-
----
-
-### Notes
-- This test endpoint does **not** consume Odds API credits.
-- It’s safe to run as often as needed to confirm Telegram connectivity and formatting.
-- Once you’re happy with the look, live scans will send the same style of alerts automatically.
-
-📌 Maintainer: You
-⚡ Powered by The Odds API + Render
+✅ With this setup, you’ll never lose track of sharp signals or API usage again.

@@ -1,3 +1,4 @@
+// src/index.js
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -23,6 +24,7 @@ import {
 } from "../odds_service.js";
 
 import { sendTelegramMessage, formatSharpBatch } from "../telegram.js";
+import { analyzeMarket } from "../sharpEngine.js"; // NEW: sharp engine
 
 const app = express();
 app.use(cors());
@@ -89,6 +91,19 @@ async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
 
       await sendTelegramMessage(batchMessage);
       console.log(`📨 Sent ${finalAlerts.length} ${modeLabel} alerts in 1 Telegram message @ ${timestamp} ET.`);
+
+      // 🔎 Run sharp engine on each alert
+      for (const g of finalAlerts) {
+        try {
+          const alert = analyzeMarket(g);
+          if (alert) {
+            await sendTelegramMessage("```json\n" + JSON.stringify(alert, null, 2) + "\n```");
+            console.log("🔔 Sharp alert generated:", alert.render.title);
+          }
+        } catch (err) {
+          console.error("❌ Sharp engine failed:", err);
+        }
+      }
     }
   } catch (err) {
     console.error("❌ Error sending Telegram alerts:", err);
@@ -139,6 +154,19 @@ async function oddsHandler(req, res) {
       });
     }
 
+    // 🔎 Run Sharp Engine on manual query
+    for (const g of data) {
+      try {
+        const alert = analyzeMarket(g);
+        if (alert) {
+          await sendTelegramMessage("```json\n" + JSON.stringify(alert, null, 2) + "\n```");
+          console.log("🔔 Sharp alert generated:", alert.render.title);
+        }
+      } catch (err) {
+        console.error("❌ Sharp engine failed:", err);
+      }
+    }
+
     res.json(data);
   } catch (err) {
     console.error("oddsHandler error:", err);
@@ -184,6 +212,23 @@ cron.schedule("*/3 * * * *", async () => {
 
         if (betCount > 0) {
           console.log(`✅ Auto-scan ran for ${sport} (${market}), found ${betCount} bets`);
+
+          // 🔎 Run sharp engine on auto-scan results
+          for (const key of Object.keys(data)) {
+            if (Array.isArray(data[key])) {
+              for (const g of data[key]) {
+                try {
+                  const alert = analyzeMarket(g);
+                  if (alert) {
+                    await sendTelegramMessage("```json\n" + JSON.stringify(alert, null, 2) + "\n```");
+                    console.log("🔔 Sharp alert generated:", alert.render.title);
+                  }
+                } catch (err) {
+                  console.error("❌ Sharp engine failed:", err);
+                }
+              }
+            }
+          }
         }
       } catch (err) {
         console.error(`❌ Auto-scan failed for ${sport} (${market}):`, err);

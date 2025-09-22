@@ -232,25 +232,10 @@ cron.schedule("*/30 * * * * *", async () => {
     return;
   }
 
-  const sports = (process.env.SCAN_SPORTS || "mlb").split(",").map(s => s.trim().toLowerCase());
-
-  for (const sport of sports) {
-    try {
-      const url = `https://odds-backend-oo4k.onrender.com/api/${sport}/f5_scan?telegram=true`;
-      const res = await fetch(url);
-      const data = await res.json();
-
-      if (!data.f5_h2h?.length && !data.f5_totals?.length) {
-        console.log(`⏸️ No active games for ${sport}, skipping...`);
-        continue;
-      }
-
-      console.log(`✅ Auto-scan ran for ${sport}, found ${data.f5_h2h.length + data.f5_totals.length} bets`);
-    } catch (err) {
-      console.error(`❌ Auto-scan failed for ${sport}:`, err);
-    }
-  }
+  const sports = ...
+  // scanning loop
 });
+
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));

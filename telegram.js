@@ -1,12 +1,10 @@
-// telegram.js
+// src/telegram.js
 import fetch from "node-fetch";
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-/**
- * Send a message to Telegram
- */
+/* -------------------- Send Message -------------------- */
 export async function sendTelegramMessage(message) {
   try {
     const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
@@ -31,32 +29,28 @@ export async function sendTelegramMessage(message) {
   }
 }
 
-/**
- * Normalize and map API market keys to human labels
- */
+/* -------------------- Market Key Mapper -------------------- */
 function mapMarketKey(market) {
   const norm = market.toLowerCase().replace(/[_\-\s]/g, "");
   switch (true) {
     case norm === "h2h":
     case norm === "h2h1st5innings":
-      return "Moneyline (ML)";
+      return "ML";
     case norm === "totals":
     case norm === "totals1st5innings":
-      return "Totals (Over/Under)";
+      return "TOT";
     case norm === "spreads":
     case norm === "spreads1st5innings":
-      return "Spread (SP)";
+      return "SP";
     case norm === "teamtotals":
     case norm === "teamtotals1st5innings":
-      return "Team Totals (TT)";
+      return "TT";
     default:
       return market.toUpperCase();
   }
 }
 
-/**
- * Format a batch of sharp alerts into nice Telegram messages
- */
+/* -------------------- Format Alerts -------------------- */
 export function formatSharpBatch(games) {
   return games.map((g) => {
     const marketLabel = mapMarketKey(g.market);
@@ -75,11 +69,14 @@ export function formatSharpBatch(games) {
         };
         displayTime = dt.toLocaleTimeString("en-US", options);
       } catch {
-        displayTime = gameTime; // fallback to raw if parsing fails
+        displayTime = gameTime;
       }
     }
 
-    let msg = `📊 *GoSignals Sharp Alert!*\n\n`;
+    // Sharp strength label
+    const sharpLabel = g.sharpLabel ? ` (${g.sharpLabel})` : "";
+
+    let msg = `📊 *GoSignals Sharp Alert${sharpLabel}!* \n\n`;
     msg += `📅 ${displayTime}\n`;
     msg += `⚔️ ${g.away} @ ${g.home}\n\n`;
     msg += `🎯 Market: ${marketLabel}\n\n`;

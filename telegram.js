@@ -2,9 +2,7 @@
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-/**
- * Sends a plain text message to Telegram.
- */
+/* -------------------- Send Message -------------------- */
 export async function sendTelegramMessage(message) {
   try {
     const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
@@ -29,10 +27,7 @@ export async function sendTelegramMessage(message) {
   }
 }
 
-/**
- * Formats a sharp betting alert for Telegram.
- * Supports: ML, Totals, Spreads, Team Totals
- */
+/* -------------------- Format Single Game (Detailed) -------------------- */
 export function formatSharpAlert(game, marketType) {
   const { home, away, time, best } = game;
 
@@ -69,4 +64,29 @@ export function formatSharpAlert(game, marketType) {
   }
 
   return message;
+}
+
+/* -------------------- Format Batch (Multiple Games) -------------------- */
+export function formatSharpBatch(games) {
+  if (!Array.isArray(games) || games.length === 0) {
+    return "⚠️ No sharp bets found.";
+  }
+
+  let msg = "🔥 *Sharp Action Alert* 🔥\n\n";
+
+  for (const g of games) {
+    msg += `📅 ${g.time}\n`;
+    msg += `🏟️ ${g.away} @ ${g.home}\n`;
+    msg += `🎯 Market: *${g.market.toUpperCase()}*\n`;
+
+    if (g.best) {
+      for (const [book, price] of Object.entries(g.best)) {
+        msg += `   • ${book}: ${price}\n`;
+      }
+    }
+
+    msg += "\n";
+  }
+
+  return msg.trim();
 }

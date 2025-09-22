@@ -225,6 +225,19 @@ async function runScans() {
   }
 }
 
+/* -------------------- Telegram Test -------------------- */
+app.get("/api/test/telegram", async (_req, res) => {
+  try {
+    const testMessage = "✅ Test message from GoSignal backend! 📊";
+    await sendTelegramMessage(testMessage);
+    res.json({ ok: true, sent: testMessage });
+  } catch (err) {
+    console.error("❌ Telegram test failed:", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+
 // Kick off every 30 seconds
 setInterval(runScans, 30 * 1000);
 

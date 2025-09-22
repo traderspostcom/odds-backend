@@ -71,7 +71,6 @@ app.get("/api/mlb/f5_scan", async (req, res) => {
     const h2hLimited = Array.isArray(h2h) ? h2h.slice(0, limit) : [];
     const totalsLimited = Array.isArray(totals) ? totals.slice(0, limit) : [];
 
-    // Send Telegram alert if requested
     if (String(req.query.telegram || "").toLowerCase() === "true") {
       for (const g of [...h2hLimited, ...totalsLimited]) {
         const message = formatSharpAlert(g, g.market || "f5");
@@ -105,7 +104,6 @@ app.get("/api/mlb/game_scan", async (req, res) => {
     const spreadsLimited = Array.isArray(spreads) ? spreads.slice(0, limit) : [];
     const teamTotalsLimited = Array.isArray(teamTotals) ? teamTotals.slice(0, limit) : [];
 
-    // Send Telegram alert if requested
     if (String(req.query.telegram || "").toLowerCase() === "true") {
       for (const g of [...h2hLimited, ...totalsLimited, ...spreadsLimited, ...teamTotalsLimited]) {
         const message = formatSharpAlert(g, g.market || "game");
@@ -189,9 +187,6 @@ app.get("/api/test/telegram", async (_req, res) => {
   }
 });
 
-/* -------------------- Routes -------------------- */
-app.get("/api/:sport/:market", oddsHandler);
-
 /* -------------------- Auto Scanning -------------------- */
 cron.schedule("*/30 * * * * *", async () => {
   const now = new Date();
@@ -201,13 +196,17 @@ cron.schedule("*/30 * * * * *", async () => {
     return; // outside scan window
   }
 
-  try {
-    const res = await fetch(
-      `https://odds-backend-oo4k.onrender.com/api/mlb/f5_scan?telegram=true`
-    );
-    console.log("✅ Auto-scan triggered, Telegram alerts sent");
-  } catch (err) {
-    console.error("❌ Auto-scan failed:", err);
+  const sports = (process.env.SCAN_SPORTS || "mlb").split(",").map(s => s.trim().toLowerCase());
+
+  for (const sport of sports) {
+    try {
+      const res = await fetch(
+        `https://odds-backend-oo4k.onrender.com/api/${sport}/f5_scan?telegram=true`
+      );
+      console.log(`✅ Auto-scan triggered for ${sport}`);
+    } catch (err) {
+      console.error(`❌ Auto-scan failed for ${sport}:`, err);
+    }
   }
 });
 

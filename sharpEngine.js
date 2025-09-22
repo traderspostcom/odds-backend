@@ -1,5 +1,5 @@
 import fs from "fs";
-import config from "../config.js";
+import config from "./config.js";
 
 const stateFile = config.profiles[config.activeProfile].stateFile || "./sharp_state.json";
 let state = {};

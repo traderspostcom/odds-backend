@@ -56,17 +56,29 @@ const FETCHERS = {
   soccer:{ h2h: getSoccerH2HNormalized }
 };
 
+/* -------------------- Helper: Sharp Filter -------------------- */
+function filterForSharps(games) {
+  return games.filter((g) => {
+    if (typeof g.tickets !== "number" || typeof g.handle !== "number") return false;
+    return g.tickets <= 40 && (g.handle - g.tickets) >= 10;
+  });
+}
+
 /* -------------------- Helper: Telegram Alerts -------------------- */
 async function handleScanAndAlerts(alerts, req = null, autoMode = false) {
   try {
     const shouldSend = autoMode || (req && String(req.query.telegram || "").toLowerCase() === "true");
 
     if (shouldSend && alerts.length > 0) {
-      const formatted = formatSharpBatch(alerts);
-      if (formatted.length > 0) {
+      const sharpAlerts = filterForSharps(alerts);
+
+      if (sharpAlerts.length > 0) {
+        const formatted = formatSharpBatch(sharpAlerts);
         const batchMessage = formatted.join("\n\n────────────\n\n");
         await sendTelegramMessage(batchMessage);
-        console.log(`📨 Sent ${formatted.length} alerts in 1 Telegram message.`);
+        console.log(`📨 Sent ${sharpAlerts.length} SHARP alerts in 1 Telegram message.`);
+      } else {
+        console.log("⏸️ No sharp action detected, skipping Telegram push.");
       }
     }
   } catch (err) {
@@ -174,6 +186,8 @@ async function oddsHandler(req, res) {
           away: g.away,
           market: g.market,
           hold: typeof g.hold === "number" ? Number(g.hold.toFixed(4)) : null,
+          tickets: g.tickets ?? null,
+          handle: g.handle ?? null,
           best
         };
       });

@@ -1,42 +1,44 @@
-// config.js
 export default {
-  /* -------------------- Scoring Weights -------------------- */
+  /* -------------------- Sharp Scoring Weights -------------------- */
   scoring: {
-    // Reverse Line Move: handle side ≠ tickets side
-    RLM: 2.0,
-
-    // Steam: multiple sharp books move in same direction
-    STEAM: 2.0,
-
-    // Crossing key numbers (NFL spread ex: 3, 7)
-    KEYNUM: 1.5,
-
-    // Late sharp move close to kickoff/tipoff
-    LATE: 1.5,
-
-    // Outlier vs consensus (one sharp book shaded differently)
-    OUTLIER: 1.0,
-
-    // Handle/Ticket split reversal
-    SPLIT: 1.0,
-
-    // Consensus indicators (public fade, etc.)
-    CONSENSUS: 1.0
+    RLM: 2.0,        // Reverse Line Move
+    STEAM: 2.0,      // Steam
+    KEYNUM: 1.5,     // Key Number Cross
+    LATE: 1.5,       // Late Sharp Move
+    OUTLIER: 1.0,    // Outlier vs Consensus
+    SPLIT: 1.0,      // Handle/Ticket Split Reversal
+    CONSENSUS: 1.0   // Public consensus fade
   },
 
-  /* -------------------- Thresholds -------------------- */
+  /* -------------------- Sharp Thresholds -------------------- */
   thresholds: {
-    strong: 5.0,  // "Strong" alert if score ≥ 5
-    lean: 3.0     // "Lean" alert if score ≥ 3
-    // <3 = PASS (no alert)
+    strong: 5.0,  // ≥ 5 = Strong Alert
+    lean: 3.0     // 3–4 = Lean Alert
+    // <3 = PASS
   },
 
-  /* -------------------- Re-Alert Rules -------------------- */
+  /* -------------------- Sharp Re-Alert Rules -------------------- */
   reAlert: {
-    cooldownMinutes: 20, // Minimum wait before same game can trigger again
-    expiryMinutes: 240   // Stop tracking game 4h after start
+    cooldownMinutes: 20,  // Wait before same game can re-trigger
+    expiryMinutes: 240    // Expire 4h after game start
   },
 
-  /* -------------------- State Storage -------------------- */
-  stateFile: "./sharp_state.json" // Persist alerts here
+  /* -------------------- Sharp State Storage -------------------- */
+  stateFile: "./sharp_state.json", // Persist sharp alerts here
+
+  /* -------------------- Scan Windows -------------------- */
+  scan: {
+    startHourET: Number(process.env.SCAN_START_HOUR || 6),   // default 6 AM ET
+    stopHourET: Number(process.env.SCAN_STOP_HOUR || 24),    // default midnight ET
+    intervalMinutes: Number(process.env.SCAN_INTERVAL || 3)  // default every 3 minutes
+  },
+
+  /* -------------------- Sports + Market Toggles -------------------- */
+  sports: {
+    mlb:   { f5: true, full: true },
+    nfl:   { h1: true, full: true },
+    ncaaf: { h1: true, full: true },
+    nba:   { h1: process.env.SCAN_NBA_H1 === "true", full: true },
+    ncaab: { h1: process.env.SCAN_NCAAB_H1 === "true", full: true }
+  }
 };

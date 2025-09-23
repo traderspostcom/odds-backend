@@ -114,6 +114,17 @@ export function analyzeMarket(snapshot) {
 }
 
 /* -------------------------------------------------------------------------- */
+/*  GPT SUPPORT (Can I DELETE?)                                                               */
+/* -------------------------------------------------------------------------- */
+function uniqBooks(offers) {
+  return Array.from(
+    new Set(
+      (offers || []).map((o) => (o.book || o.bookmaker || "").toLowerCase())
+    )
+  ).filter(Boolean);
+}
+
+/* -------------------------------------------------------------------------- */
 /*  SPLITS path                                                               */
 /* -------------------------------------------------------------------------- */
 function evaluateWithSplits({

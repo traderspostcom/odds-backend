@@ -1,193 +1,280 @@
-// src/fetchers.js
-// Centralized map of all sport/market fetchers + safety guards.
-// All network access should go through here (and then through odds_service).
+// fetchers.js
+// Safe Odds API fetchers + mappers (NFL H2H → snapshots with multi-book offers)
 
-import * as odds from "../odds_service.js";
+import { setTimeout as sleep } from "timers/promises";
 
-/* -------------------- Env helpers -------------------- */
-export const isOn = (key, def = false) => {
-  const v = String(process.env[key] ?? "").trim().toLowerCase();
-  if (["1", "true", "yes", "on"].includes(v)) return true;
-  if (["0", "false", "no", "off"].includes(v)) return false;
-  return !!def;
-};
+/* -------------------------------------------------------------------------- */
+/*  Env & knobs                                                                */
+/* -------------------------------------------------------------------------- */
+const ODDS_API_ENABLED = flag("ODDS_API_ENABLED", true);
+const ODDS_API_KEY = process.env.ODDS_API_KEY || "";
+const RATE_LIMIT_MS = num("RATE_LIMIT_MS", 1200);
+const RETRY_429_MAX = num("RETRY_429_MAX", 0);
 
-const ODDS_API_ENABLED = process.env.ODDS_API_ENABLED !== "false"; // master OFF if 'false'
-const BOOKS_WHITELIST = (process.env.BOOKS_WHITELIST || "pinnacle,circa,cris")
-  .split(",")
-  .map(s => s.trim().toLowerCase())
-  .filter(Boolean);
+const DIAG = flag("DIAG", false);
+const MAX_EVENTS_PER_CALL = num("MAX_EVENTS_PER_CALL", 3);
+const REGION = (process.env.ODDS_API_REGION || "us").toLowerCase(); // 'us','us2','eu','uk','au'
+const DATE_FMT = "iso";
+const ODDS_FMT = "american";
 
-const MAX_EVENTS_PER_CALL = Number(process.env.MAX_EVENTS_PER_CALL || 20); // cap event volume
-const MAX_BOOKS_PER_CALL  = Number(process.env.MAX_BOOKS_PER_CALL  || 3);  // defensive: keep small
-
-/* -------------------- Safe call wrapper -------------------- */
-/**
- * Wraps a normalized fetcher to:
- *  - Respect ODDS_API_ENABLED master switch
- *  - Inject book whitelist (when the underlying fetcher supports args.books)
- *  - Clamp events/books if the upstream fetcher supports args.{limit,books}
- *  - Catch 422/unsupported fast without throwing up-stack
- */
-function wrapFetcher(label, fn) {
-  return async (args = {}) => {
-    if (!ODDS_API_ENABLED) {
-      console.warn(`🛑 Provider disabled (ODDS_API_ENABLED=false) for ${label}`);
-      return []; // Pretend empty; callers should handle gracefully
-    }
-
-    // Normalize args
-    const a = { ...(args || {}) };
-
-    // Books whitelisting
-    if (!a.books && Array.isArray(BOOKS_WHITELIST) && BOOKS_WHITELIST.length) {
-      a.books = BOOKS_WHITELIST.slice(0, MAX_BOOKS_PER_CALL);
-    } else if (Array.isArray(a.books)) {
-      a.books = a.books
-        .map(b => String(b).toLowerCase())
-        .filter(b => BOOKS_WHITELIST.includes(b))
-        .slice(0, MAX_BOOKS_PER_CALL);
-    }
-
-    // --- Odds API → snapshot (NFL H2H) ---
+// Build the list once and reuse both in-request (bookmakers param) and post-filter
 const BOOKS_WHITELIST = (process.env.BOOKS_WHITELIST || "")
   .split(",")
-  .map(s => s.trim().toLowerCase())
+  .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
 
-function filterBookKey(key) {
-  if (!key) return false;
-  const k = String(key).toLowerCase();
-  if (BOOKS_WHITELIST.length === 0) return true; // no filter
-  return BOOKS_WHITELIST.includes(k);
+// Helper: some users prefer alerting on just Pinnacle, but consensus from many
+const ALERT_BOOKS = (process.env.ALERT_BOOKS || "pinnacle")
+  .split(",")
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+
+/* -------------------------------------------------------------------------- */
+/*  Public API                                                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Fetch NFL H2H odds and return snapshots formatted for sharpEngine (EV path).
+ * Each snapshot has: { sport, market, gameId, home, away, commence_time, offers[] }
+ */
+export async function fetchNFLH2H({ limit = 5 } = {}) {
+  if (!ODDS_API_ENABLED) {
+    diag(() => console.log("diag[fetchNFLH2H] provider gate OFF → returning []"));
+    return [];
+  }
+  if (!ODDS_API_KEY) {
+    warn("⚠️ ODDS_API_KEY missing; cannot call provider.");
+    return [];
+  }
+
+  const sportKey = "americanfootball_nfl";
+  const base = `https://api.the-odds-api.com/v4/sports/${sportKey}/odds`;
+
+  const params = new URLSearchParams({
+    regions: REGION,
+    markets: "h2h",
+    oddsFormat: ODDS_FMT,
+    dateFormat: DATE_FMT,
+    apiKey: ODDS_API_KEY,
+  });
+
+  // Limit provider response to whitelisted books if provided (saves credits)
+  if (BOOKS_WHITELIST.length > 0) {
+    params.set("bookmakers", BOOKS_WHITELIST.join(","));
+  }
+
+  const url = `${base}?${params.toString()}`;
+
+  const data = await safeJsonGet(url);
+  if (!Array.isArray(data) || data.length === 0) {
+    diag(() => console.log("diag[fetchNFLH2H] empty provider payload"));
+    return [];
+  }
+
+  // Map → snapshots
+  const snapshots = [];
+  let seen = 0;
+  for (const ev of data) {
+    if (seen >= Math.max(1, MAX_EVENTS_PER_CALL)) break;
+    const snap = mapOddsEventToNFLH2HSnapshot(ev);
+    // We’ll allow snap with 1 offer (for logging), but EV path needs ≥2 to analyze.
+    if (snap) {
+      snapshots.push(snap);
+      seen++;
+    }
+  }
+
+  // Respect the caller-visible limit
+  const out = snapshots.slice(0, Math.max(1, limit));
+
+  diag(() =>
+    out.forEach((s) => {
+      const books = uniqBooks(s.offers);
+      console.log(
+        `diag[fetchNFLH2H] ${s.away} @ ${s.home} | offers=${s.offers.length} | books=[${books.join(
+          ", "
+        )}] | alertBooks=[${ALERT_BOOKS.join(", ")}]`
+      );
+    })
+  );
+
+  // Light pacing between calls (even though this fetcher uses one call)
+  await sleep(RATE_LIMIT_MS);
+
+  return out;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Mapper: Odds API event → snapshot with offers[]                            */
+/* -------------------------------------------------------------------------- */
+
+export function mapOddsEventToNFLH2HSnapshot(ev) {
+  try {
+    const gameId = ev.id || ev.game_id || ev.event_id;
+    const home = ev.home_team;
+    const away = ev.away_team;
+    const commence_time = ev.commence_time; // ISO 8601
+
+    if (!home || !away || !Array.isArray(ev.bookmakers)) return null;
+
+    const offers = [];
+    for (const bm of ev.bookmakers) {
+      const bookKey = norm(bm.key || bm.title);
+      if (!bookKey) continue;
+      if (BOOKS_WHITELIST.length > 0 && !BOOKS_WHITELIST.includes(bookKey)) {
+        continue;
+      }
+
+      // Find the H2H market
+      const h2h = (bm.markets || []).find(
+        (m) => norm(m.key) === "h2h" || norm(m.market) === "h2h"
+      );
+      if (!h2h || !Array.isArray(h2h.outcomes)) continue;
+
+      // Outcomes are named by team; match by exact (case-insensitive) name
+      const oHome = findOutcomeByTeam(h2h.outcomes, home);
+      const oAway = findOutcomeByTeam(h2h.outcomes, away);
+      if (!oHome || !oAway) continue;
+
+      const homeAmerican = toAmerican(oHome.price);
+      const awayAmerican = toAmerican(oAway.price);
+      if (homeAmerican == null || awayAmerican == null) continue;
+
+      offers.push({
+        book: bookKey,
+        prices: {
+          home: { american: homeAmerican },
+          away: { american: awayAmerican },
+        },
+      });
+    }
+
+    return {
+      sport: "nfl",
+      market: "NFL H2H",
+      gameId,
+      home,
+      away,
+      commence_time,
+      // Your plan has no splits — leave tickets/handle undefined.
+      offers, // critical for EV analyzer (needs ≥ 2 to analyze)
+    };
+  } catch (e) {
+    warn(`⚠️ mapOddsEventToNFLH2HSnapshot error: ${e?.message || e}`);
+    return null;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Utilities                                                                  */
+/* -------------------------------------------------------------------------- */
+
+function norm(x) {
+  return typeof x === "string" ? x.toLowerCase().trim() : "";
 }
 
 function toAmerican(n) {
-  // assume Odds API already returns american when oddsFormat=american
-  // but guard just in case it’s numeric string
+  // Odds API returns "price" as a number for american when oddsFormat=american.
   if (n == null) return null;
-  const num = Number(n);
-  return Number.isFinite(num) ? num : null;
+  const numVal = Number(n);
+  return Number.isFinite(numVal) ? numVal : null;
 }
-// GPT SUPPORT
-export function mapOddsEventToNFLH2HSnapshot(ev) {
-  // ev fields per Odds API v4: id, sport_key, commence_time, home_team, away_team, bookmakers: [{ key, title, markets: [{ key, outcomes: [...] }] }]
-  const home = ev.home_team;
-  const away = ev.away_team;
 
-  // Collect H2H market from each bookmaker
-  const offers = [];
-  for (const bm of ev.bookmakers || []) {
-    const bookKey = (bm.key || bm.title || "").toLowerCase();
-    if (!filterBookKey(bookKey)) continue;
+function findOutcomeByTeam(outcomes, teamName) {
+  const t = (teamName || "").toLowerCase();
+  return outcomes.find((o) => (o.name || "").toLowerCase() === t);
+}
 
-    const h2h = (bm.markets || []).find(m => (m.key || "").toLowerCase() === "h2h");
-    if (!h2h || !Array.isArray(h2h.outcomes)) continue;
+function uniqBooks(offers = []) {
+  return Array.from(
+    new Set(
+      offers.map((o) => (o.book || o.bookmaker || "").toLowerCase()).filter(Boolean)
+    )
+  );
+}
 
-    // Find prices for home/away by matching team names (Odds API uses team names in outcomes.name)
-    const oHome = h2h.outcomes.find(o => (o.name || "").toLowerCase() === (home || "").toLowerCase());
-    const oAway = h2h.outcomes.find(o => (o.name || "").toLowerCase() === (away || "").toLowerCase());
-    if (!oHome || !oAway) continue;
-
-    const homeAmerican = toAmerican(oHome.price);
-    const awayAmerican = toAmerican(oAway.price);
-    if (homeAmerican == null || awayAmerican == null) continue;
-
-    offers.push({
-      book: bookKey,
-      prices: {
-        home: { american: homeAmerican },
-        away: { american: awayAmerican },
-      },
-    });
-  }
-
+function headersJson() {
   return {
-    sport: "nfl",
-    market: "NFL H2H",
-    gameId: ev.id,
-    home,
-    away,
-    commence_time: ev.commence_time, // UTC ISO from Odds API
-    // no splits for your plan, so tickets/handle undefined
-    offers, // <<< critical for EV analyzer
+    "Content-Type": "application/json",
+    Accept: "application/json",
   };
 }
 
-
-    // Event cap (if upstream honors it)
-    if (a.limit == null) a.limit = MAX_EVENTS_PER_CALL;
-
+// Safe fetch with minimal retries & rate limiting
+async function safeJsonGet(url) {
+  let attempt = 0;
+  let lastErr;
+  while (attempt <= Math.max(0, RETRY_429_MAX)) {
     try {
-      const out = await fn(a);
-      return Array.isArray(out) ? out : [];
-    } catch (err) {
-      const msg = String(err?.message || err);
-      if (msg.includes("INVALID_MARKET") || msg.includes("Markets not supported") || msg.includes("status=422")) {
-        console.warn(`⚠️  Skipping unsupported market: ${label}`);
-        return [];
+      const res = await fetch(url, {
+        method: "GET",
+        headers: headersJson(),
+      });
+
+      if (res.status === 429) {
+        // Rate limited by provider — backoff then retry (if allowed)
+        attempt++;
+        const wait =
+          RATE_LIMIT_MS * (attempt + 1); // simple linear step to stay conservative
+        diag(() =>
+          console.log(`diag[safeJsonGet] 429 from provider, backoff ${wait}ms (attempt ${attempt})`)
+        );
+        await sleep(wait);
+        continue;
       }
-      // Let outer retry (in index.js) decide on 429s etc.
-      throw err;
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status} ${res.statusText} – ${text.slice(0, 180)}`);
+      }
+
+      return await res.json();
+    } catch (e) {
+      lastErr = e;
+      // network hiccup or parse fail — do not retry aggressively
+      break;
     }
-  };
+  }
+  warn(`⚠️ safeJsonGet failed: ${lastErr?.message || lastErr}`);
+  return [];
 }
 
-/* -------------------- FETCHERS (single source of truth) -------------------- */
-/**
- * Every function below must be a **wrapped** version of the raw odds_service export.
- * If a raw fetcher is absent (undefined), keep it undefined; callers gate by existence.
- */
-export const FETCHERS = {
-  nfl: {
-    // Full game
-    h2h:     odds.getNFLH2HNormalized     ? wrapFetcher("NFL H2H",     odds.getNFLH2HNormalized)     : undefined,
-    spreads: odds.getNFLSpreadsNormalized ? wrapFetcher("NFL Spreads", odds.getNFLSpreadsNormalized) : undefined,
-    totals:  odds.getNFLTotalsNormalized  ? wrapFetcher("NFL Totals",  odds.getNFLTotalsNormalized)  : undefined,
-
-    // First Half (optional; only used if defined upstream)
-    h1_h2h:     odds.getNFLH1H2HNormalized     ? wrapFetcher("NFL 1H H2H",     odds.getNFLH1H2HNormalized)     : undefined,
-    h1_spreads: odds.getNFLH1SpreadsNormalized ? wrapFetcher("NFL 1H Spreads", odds.getNFLH1SpreadsNormalized) : undefined,
-    h1_totals:  odds.getNFLH1TotalsNormalized  ? wrapFetcher("NFL 1H Totals",  odds.getNFLH1TotalsNormalized)  : undefined
-  },
-
-  mlb: {
-    h2h:         odds.getMLBH2HNormalized        ? wrapFetcher("MLB H2H",         odds.getMLBH2HNormalized)        : undefined,
-    spreads:     odds.getMLBSpreadsNormalized    ? wrapFetcher("MLB Spreads",     odds.getMLBSpreadsNormalized)    : undefined,
-    totals:      odds.getMLBTotalsNormalized     ? wrapFetcher("MLB Totals",      odds.getMLBTotalsNormalized)     : undefined,
-
-    // First 5
-    f5_h2h:      odds.getMLBF5H2HNormalized      ? wrapFetcher("MLB F5 H2H",      odds.getMLBF5H2HNormalized)      : undefined,
-    f5_totals:   odds.getMLBF5TotalsNormalized   ? wrapFetcher("MLB F5 Totals",   odds.getMLBF5TotalsNormalized)   : undefined,
-
-    // Extras (often unsupported on base plans)
-    team_totals: odds.getMLBTeamTotalsNormalized ? wrapFetcher("MLB Team Totals", odds.getMLBTeamTotalsNormalized) : undefined,
-    alt:         odds.getMLBAltLinesNormalized   ? wrapFetcher("MLB Alt",         odds.getMLBAltLinesNormalized)   : undefined
-  },
-
-  nba: {
-    h2h:     odds.getNBAH2HNormalized     ? wrapFetcher("NBA H2H",     odds.getNBAH2HNormalized)     : undefined,
-    spreads: odds.getNBASpreadsNormalized ? wrapFetcher("NBA Spreads", odds.getNBASpreadsNormalized) : undefined,
-    totals:  odds.getNBATotalsNormalized  ? wrapFetcher("NBA Totals",  odds.getNBATotalsNormalized)  : undefined
-  },
-
-  ncaaf: {
-    h2h:     odds.getNCAAFH2HNormalized     ? wrapFetcher("NCAAF H2H",     odds.getNCAAFH2HNormalized)     : undefined,
-    spreads: odds.getNCAAFSpreadsNormalized ? wrapFetcher("NCAAF Spreads", odds.getNCAAFSpreadsNormalized) : undefined,
-    totals:  odds.getNCAAFTotalsNormalized  ? wrapFetcher("NCAAF Totals",  odds.getNCAAFTotalsNormalized)  : undefined
-  },
-
-  ncaab: {
-    h2h:     odds.getNCAABH2HNormalized     ? wrapFetcher("NCAAB H2H",     odds.getNCAABH2HNormalized)     : undefined,
-    spreads: odds.getNCAABSpreadsNormalized ? wrapFetcher("NCAAB Spreads", odds.getNCAABSpreadsNormalized) : undefined,
-    totals:  odds.getNCAABTotalsNormalized  ? wrapFetcher("NCAAB Totals",  odds.getNCAABTotalsNormalized)  : undefined
-  },
-
-  tennis: {
-    h2h: odds.getTennisH2HNormalized ? wrapFetcher("Tennis H2H", odds.getTennisH2HNormalized) : undefined
-  },
-
-  soccer: {
-    h2h: odds.getSoccerH2HNormalized ? wrapFetcher("Soccer H2H", odds.getSoccerH2HNormalized) : undefined
+/* -------------------------------------------------------------------------- */
+/*  Tiny logging helpers                                                       */
+/* -------------------------------------------------------------------------- */
+function diag(fn) {
+  if (DIAG) {
+    try {
+      fn();
+    } catch {}
   }
+}
+function warn(msg) {
+  try {
+    console.warn(msg);
+  } catch {}
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Small env helpers                                                          */
+/* -------------------------------------------------------------------------- */
+function flag(k, def = false) {
+  const v = process.env[k];
+  if (v == null) return def;
+  const s = String(v).toLowerCase();
+  if (["1", "true", "yes", "y"].includes(s)) return true;
+  if (["0", "false", "no", "n"].includes(s)) return false;
+  return def;
+}
+function num(k, def = 0) {
+  const v = Number(process.env[k]);
+  return Number.isFinite(v) ? v : def;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Default export (optional convenience)                                      */
+/* -------------------------------------------------------------------------- */
+export default {
+  fetchNFLH2H,
+  mapOddsEventToNFLH2HSnapshot,
 };

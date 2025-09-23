@@ -14,9 +14,16 @@ const DIAG = flag("DIAG", true);
 
 const MANUAL_MAX_JOBS = num("MANUAL_MAX_JOBS", 1);
 const MAX_JOBS_PER_SPORT = num("MAX_JOBS_PER_SPORT", 1);
-const MAX_EVENTS_PER_CALL = num("MAX_EVENTS_PER_CALL", 3); // fetchers honor this
+const MAX_EVENTS_PER_CALL = num("MAX_EVENTS_PER_CALL", 1); // fetchers honor this
 
 const ENABLE_NFL_H2H = flag("ENABLE_NFL_H2H", true);
+
+/* -------- provider/env bits we’ll also expose in health & diagnostics ------- */
+const ODDS_API_ENABLED = flag("ODDS_API_ENABLED", false);
+const ODDS_API_KEY = process.env.ODDS_API_KEY || "";
+const ODDS_API_REGION = (process.env.ODDS_API_REGION || "us").toString();
+const BOOKS_WHITELIST = (process.env.BOOKS_WHITELIST || "").toString();
+const ALERT_BOOKS = (process.env.ALERT_BOOKS || "pinnacle").toString();
 
 /* ------------------------------ APP BOOTSTRAP ----------------------------- */
 const app = express();
@@ -37,13 +44,60 @@ if (HARD_KILL) {
         HARD_KILL,
         SCAN_ENABLED,
         AUTO_TELEGRAM,
+        DIAG,
         MANUAL_MAX_JOBS,
         MAX_JOBS_PER_SPORT,
         MAX_EVENTS_PER_CALL,
         ENABLE_NFL_H2H,
+        // extra visibility for current debugging
+        ODDS_API_ENABLED,
+        ODDS_API_KEY_present: Boolean(ODDS_API_KEY),
+        ODDS_API_REGION,
+        BOOKS_WHITELIST,
+        ALERT_BOOKS,
       },
       ts: new Date().toISOString(),
     });
+  });
+
+  /* --------------------------- Provider diagnostics ------------------------- */
+  // GET /diag/provider  -> pings The Odds API /v4/sports (free) to validate the key
+  app.get("/diag/provider", async (_req, res) => {
+    try {
+      if (!ODDS_API_ENABLED) {
+        return res.json({
+          ok: true,
+          provider_enabled: false,
+          reason: "ODDS_API_ENABLED=false",
+          hint: "Set ODDS_API_ENABLED=true in Render → Environment, then redeploy.",
+        });
+      }
+      if (!ODDS_API_KEY) {
+        return res.status(400).json({
+          ok: false,
+          error: "missing_odds_api_key",
+          hint: "Add ODDS_API_KEY in Render → Environment and redeploy.",
+        });
+      }
+
+      const url = `https://api.the-odds-api.com/v4/sports?apiKey=${encodeURIComponent(ODDS_API_KEY)}`;
+      const r = await fetch(url, { method: "GET" });
+      const text = await r.text();
+      let body;
+      try { body = JSON.parse(text); } catch { body = text; }
+
+      return res.status(r.ok ? 200 : 400).json({
+        ok: r.ok,
+        status: r.status,
+        provider_enabled: ODDS_API_ENABLED,
+        region: ODDS_API_REGION,
+        books_whitelist: BOOKS_WHITELIST,
+        alert_books: ALERT_BOOKS,
+        response_sample: Array.isArray(body) ? body.slice(0, 3) : body, // trim big lists
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: "provider_diag_failed", message: e?.message || String(e) });
+    }
   });
 
   /* ---------------------- Zero-credit Telegram test ping -------------------- */
@@ -73,14 +127,14 @@ if (HARD_KILL) {
   });
 
   /* -------------------------- Mock scan → Telegram -------------------------- */
-  // IMPORTANT: this route is above /api/scan/:sport so it doesn't get captured as sport=mock
+  // NOTE: keep above /api/scan/:sport
   // GET /api/scan/mock?telegram=true&force=1
   app.get("/api/scan/mock", async (req, res) => {
     try {
       const wantTelegram = toBool(req.query.telegram, false);
       const force = toBool(req.query.force, false);
 
-      // Synthetic snapshot that guarantees an EV alert (no provider calls, zero credits)
+      // Synthetic snapshot that guarantees an EV alert (no provider calls)
       const snapshot = {
         sport: "nfl",
         market: "NFL H2H",
@@ -89,7 +143,7 @@ if (HARD_KILL) {
         away: "Testers",
         commence_time: new Date(Date.now() + 3 * 3600e3).toISOString(), // +3h
 
-        // SPLITS fields (kept for completeness; EV path will fire regardless)
+        // SPLITS (kept for completeness; EV path will fire regardless)
         tickets: 40,
         handle: 60,
         hold: 0.02,
@@ -132,12 +186,12 @@ if (HARD_KILL) {
   });
 
   /* ------------------------------ Manual scan ------------------------------ */
-  // GET /api/scan/nfl?limit=5&telegram=false&dryrun=true
-  // With ODDS_API_ENABLED=false (in fetchers), this does NOT hit the provider.
+  // GET /api/scan/nfl?limit=1&telegram=true
+  // If ODDS_API_ENABLED=false (in env/fetchers), this does NOT hit the provider.
   app.get("/api/scan/:sport", async (req, res) => {
     try {
       const sport = String(req.params.sport || "").toLowerCase();
-      const limit = clampInt(req.query.limit, 5, 1, 50);
+      const limit = clampInt(req.query.limit, 1, 1, 50);
       const wantTelegram = toBool(req.query.telegram, false);
       const dryrun = toBool(req.query.dryrun, false);
 

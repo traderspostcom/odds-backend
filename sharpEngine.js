@@ -1,17 +1,21 @@
 // sharpEngine.js (root)
-// Hybrid analyzer: use SPLITS if available, else EV fallback from multi-book offers.
-// Env-driven (no config import). Supports ALERT_BOOKS="*" and per-book consensus exclusion.
-// Exports: analyzeMarket(snapshot)
+// Hybrid analyzer: Splits → EV → Outlier (in that order).
+// Env-driven; no external config import. Exports analyzeMarket(snapshot).
 
 import fs from "fs";
 
 /* ============================== ENV / KNOBS =============================== */
-// Logging
 const DIAG = envBool("DIAG", true);
 
-// EV thresholds (fractions: 0.01 = 1%)
-const LEAN_THRESHOLD   = envNum("LEAN_THRESHOLD", 0.005);  // 0.5% default
-const STRONG_THRESHOLD = envNum("STRONG_THRESHOLD", 0.010); // 1.0% default
+// EV thresholds (fractions, e.g., 0.01 = 1%)
+const LEAN_THRESHOLD   = envNum("LEAN_THRESHOLD", 0.005);
+const STRONG_THRESHOLD = envNum("STRONG_THRESHOLD", 0.010);
+
+// Outlier thresholds (price advantage in American "cents")
+const OUT_DOG_LEAN   = envInt("OUTLIER_DOG_CENTS_LEAN", 8);   // e.g., +112 vs +104 = +8
+const OUT_DOG_STRONG = envInt("OUTLIER_DOG_CENTS_STRONG", 15);
+const OUT_FAV_LEAN   = envInt("OUTLIER_FAV_CENTS_LEAN", 6);   // e.g., -110 vs -116 = +6
+const OUT_FAV_STRONG = envInt("OUTLIER_FAV_CENTS_STRONG", 10);
 
 // Books to alert on. Supports "*" meaning "any".
 const RAW_ALERT_BOOKS = (process.env.ALERT_BOOKS || "pinnacle")
@@ -19,18 +23,15 @@ const RAW_ALERT_BOOKS = (process.env.ALERT_BOOKS || "pinnacle")
 const ALERT_ALL   = RAW_ALERT_BOOKS.includes("*");
 const ALERT_BOOKS = RAW_ALERT_BOOKS.filter(b => b !== "*");
 
-// Simple re-alert / dedupe state (per gameId)
+// Simple re-alert state (cooldown 30m)
 const STATE_FILE = process.env.SHARP_STATE_FILE || "./sharp_state.json";
 let STATE = {};
 try {
   if (fs.existsSync(STATE_FILE)) STATE = JSON.parse(fs.readFileSync(STATE_FILE, "utf8") || "{}");
 } catch { STATE = {}; }
-function saveState() {
-  try { fs.writeFileSync(STATE_FILE, JSON.stringify(STATE, null, 2)); }
-  catch (e) { console.warn("⚠️ Could not persist sharp state:", e?.message || e); }
-}
+function saveState() { try { fs.writeFileSync(STATE_FILE, JSON.stringify(STATE, null, 2)); } catch {} }
 
-/* ================================ EXPORT ================================== */
+/* ================================= EXPORT ================================= */
 export function analyzeMarket(snapshot) {
   if (!snapshot || typeof snapshot !== "object") return null;
 
@@ -41,42 +42,56 @@ export function analyzeMarket(snapshot) {
   const away = snapshot.away;
   const commence_time = snapshot.commence_time || null;
 
-  // 1) Splits path (tickets/handle present)
+  // 1) Splits path (if tickets/handle present)
   if (hasSplits(snapshot)) {
-    const a = analyzeWithSplits(snapshot, { sport, market, gameId, home, away, commence_time });
-    if (a) return a;
+    const splitsAlert = analyzeWithSplits(snapshot, { sport, market, gameId, home, away, commence_time });
+    if (splitsAlert) return splitsAlert;
   }
 
-  // 2) EV fallback path (needs ≥2 distinct books)
+  // Normalize offers
   const offers = normalizeOffers(snapshot);
   if (offers.length < 2) {
-    diag(() => console.log(`diag[EV] ${away} @ ${home} | offers=${offers.length} (need ≥2)`));
+    diag(() => console.log(`diag[ANZ] ${away} @ ${home} | offers=${offers.length} (need ≥2)`));
     return null;
   }
 
-  return analyzeWithEV(offers, { sport, market, gameId, home, away, commence_time });
+  // Partition target vs non-target
+  const all = offers;
+  const target = ALERT_ALL ? all : all.filter(o => ALERT_BOOKS.includes(o.book));
+  const nonTarget = ALERT_ALL ? all : all.filter(o => !ALERT_BOOKS.includes(o.book));
+  if (target.length === 0) {
+    diag(() => console.log(`diag[ANZ] ${away} @ ${home} | no target offers under ALERT_BOOKS=[${ALERT_BOOKS.join(",")}]`));
+    return null;
+  }
+
+  // 2) EV path
+  const evAlert = analyzeWithEV(all, target, nonTarget, { sport, market, gameId, home, away, commence_time });
+  if (evAlert) return evAlert;
+
+  // 3) Outlier path (price advantage in cents vs consensus)
+  const outlierAlert = analyzeWithOutliers(all, target, { sport, market, gameId, home, away, commence_time });
+  if (outlierAlert) return outlierAlert;
+
+  return null;
 }
 
-/* =============================== SPLITS PATH ============================== */
+/* ================================ SPLITS PATH ============================== */
 function analyzeWithSplits(s, meta) {
   const tickets = num(s.tickets);
   const handle  = num(s.handle);
   const hold    = num(s.hold, null);
   if (!isFiniteNum(tickets) || !isFiniteNum(handle)) return null;
 
-  // Normalize to 0..100
   const tPct = tickets > 1 ? tickets : tickets * 100;
   const hPct = handle  > 1 ? handle  : handle  * 100;
   const gapPct = hPct - tPct;
 
-  // Simple rules
   const rules = { maxTicketsPct: 45, minHandlePct: 55, minGap: 10, maxHold: 7, prefHold: 5 };
   if (tPct > rules.maxTicketsPct) return null;
   if (hPct < rules.minHandlePct)  return null;
   if (gapPct < rules.minGap)      return null;
   if (hold != null && hold > rules.maxHold / 100) return null;
 
-  // Score → tier
   let score = 0;
   if (gapPct >= rules.minGap) score += 2;
   if (hold == null || hold <= rules.prefHold / 100) score += 1;
@@ -84,7 +99,6 @@ function analyzeWithSplits(s, meta) {
   const tier = score >= 3 ? "strong" : score >= 2 ? "lean" : "pass";
   if (tier === "pass") return null;
 
-  // Build alert
   const side = s.side || (hPct >= tPct ? "home" : "away");
   const team = side === "home" ? meta.home : meta.away;
   const line = s.line ?? null;
@@ -106,35 +120,18 @@ function analyzeWithSplits(s, meta) {
   });
 }
 
-/* ================================ EV PATH =================================
-   Key improvement: when evaluating a book’s price, we build consensus FAIR
-   from *other* books (exclude the candidate) to avoid diluting edges.       */
-function analyzeWithEV(offers, meta) {
-  // Partition target vs non-target books.
-  const all = offers;
-  const targetSet   = ALERT_ALL ? all : all.filter(o => ALERT_BOOKS.includes(o.book));
-  const nonTargetSet = ALERT_ALL ? all : all.filter(o => !ALERT_BOOKS.includes(o.book));
-
-  // If ALERT_ALL, we’ll still exclude each candidate from consensus below.
-  if (targetSet.length === 0) {
-    diag(() => console.log(`diag[EV] ${meta.away} @ ${meta.home} | no target offers (ALERT_BOOKS=[${ALERT_BOOKS.join(",")}])`));
-    return null;
-  }
-
+/* ================================= EV PATH =================================
+   For each candidate book, we build a FAIR from *other* books and compute EV. */
+function analyzeWithEV(all, target, nonTarget, meta) {
   let best = null;
 
-  for (const o of targetSet) {
-    // Build consensus excluding this candidate book (preferred).
+  for (const o of target) {
     let consensusPool = all.filter(x => x.book !== o.book);
-    if (!consensusPool.length) {
-      // Fallback to non-target pool (if we’re not ALERT_ALL).
-      consensusPool = nonTargetSet.length ? nonTargetSet : all;
-    }
+    if (!consensusPool.length) consensusPool = nonTarget.length ? nonTarget : all;
 
     const fair = buildFairFrom(consensusPool);
     if (!fair) continue;
 
-    // Evaluate both sides at this book.
     if (isFiniteNum(o.home)) {
       const evH = evFromFair(o.home, fair.pHome);
       if (!best || evH > best.evPct) best = { side: "home", price: o.home, book: o.book, evPct: evH, fairN: fair.n, fairPH: fair.pHome };
@@ -146,20 +143,18 @@ function analyzeWithEV(offers, meta) {
   }
 
   if (!best) return null;
-
   const ev = best.evPct;
   const tier = ev >= STRONG_THRESHOLD ? "strong" : ev >= LEAN_THRESHOLD ? "lean" : "pass";
   if (tier === "pass") {
-    diag(() => console.log(`diag[EV] ${meta.away} @ ${meta.home} | best EV ${(ev * 100).toFixed(2)}% below gates`));
+    diag(() => console.log(`diag[EV] ${meta.away} @ ${meta.home} | best ${(ev*100).toFixed(2)}% < gates (${(LEAN_THRESHOLD*100).toFixed(2)}%)`));
     return null;
   }
 
   const team = best.side === "home" ? meta.home : meta.away;
-
   return finalizeAlert({
     ...meta,
     source: "ev",
-    score: Math.round(ev * 10000) / 100, // EV% with 2 dp
+    score: Math.round(ev * 10000) / 100, // EV% to 2dp
     tier,
     side: best.side,
     team,
@@ -167,10 +162,86 @@ function analyzeWithEV(offers, meta) {
     priceBook: best.book,
     evPct: ev,
     signals: [
-      { key: "consensus_n", label: `Consensus N=${best.fairN}`,     weight: 1 },
+      { key: "consensus_n", label: `Consensus N=${best.fairN}`, weight: 1 },
       { key: "fair_home",   label: `Fair(Home) ${(best.fairPH*100).toFixed(1)}%`, weight: 1 },
-      { key: "ev_pct",      label: `+${(ev*100).toFixed(2)}% EV`,   weight: 2 },
-      { key: "book",        label: `Book ${best.book}`,             weight: 1 },
+      { key: "ev_pct",      label: `+${(ev*100).toFixed(2)}% EV`, weight: 2 },
+      { key: "book",        label: `Book ${best.book}`, weight: 1 },
+    ],
+  });
+}
+
+/* =============================== OUTLIER PATH ==============================
+   If EV is tiny, we still alert when a book’s price is materially better
+   (in cents) than the consensus median of other books.                      */
+function analyzeWithOutliers(all, target, meta) {
+  let best = null;
+
+  for (const o of target) {
+    const others = all.filter(x => x.book !== o.book);
+    if (others.length < 1) continue;
+
+    const medHome = median(others.map(x => x.home).filter(isFiniteNum));
+    const medAway = median(others.map(x => x.away).filter(isFiniteNum));
+
+    // Home side outlier
+    if (isFiniteNum(o.home) && isFiniteNum(medHome)) {
+      const diff = o.home - medHome; // positive is better for both dogs & favs
+      const isDog = o.home >= 0;
+      const leanGate   = isDog ? OUT_DOG_LEAN   : OUT_FAV_LEAN;
+      const strongGate = isDog ? OUT_DOG_STRONG : OUT_FAV_STRONG;
+
+      let tier = null;
+      if (diff >= strongGate) tier = "strong";
+      else if (diff >= leanGate) tier = "lean";
+
+      if (tier) {
+        const s = {
+          side: "home", price: o.home, book: o.book, diff,
+          tier, med: medHome, othersN: others.length
+        };
+        if (!best || rankOutlier(s.tier) > rankOutlier(best.tier) || s.diff > best.diff) best = s;
+      }
+    }
+
+    // Away side outlier
+    if (isFiniteNum(o.away) && isFiniteNum(medAway)) {
+      const diff = o.away - medAway;
+      const isDog = o.away >= 0;
+      const leanGate   = isDog ? OUT_DOG_LEAN   : OUT_FAV_LEAN;
+      const strongGate = isDog ? OUT_DOG_STRONG : OUT_FAV_STRONG;
+
+      let tier = null;
+      if (diff >= strongGate) tier = "strong";
+      else if (diff >= leanGate) tier = "lean";
+
+      if (tier) {
+        const s = {
+          side: "away", price: o.away, book: o.book, diff,
+          tier, med: medAway, othersN: others.length
+        };
+        if (!best || rankOutlier(s.tier) > rankOutlier(best.tier) || s.diff > best.diff) best = s;
+      }
+    }
+  }
+
+  if (!best) return null;
+
+  const team = best.side === "home" ? meta.home : meta.away;
+  return finalizeAlert({
+    ...meta,
+    source: "outlier",
+    score: Math.round(best.diff), // cents advantage
+    tier: best.tier,
+    side: best.side,
+    team,
+    entryLine: best.price,
+    priceBook: best.book,
+    evPct: null,
+    signals: [
+      { key: "consensus_n", label: `Consensus N=${best.othersN}`, weight: 1 },
+      { key: "median_ref",  label: `Median ${best.side.toUpperCase()} ${fmtAm(best.med)}`, weight: 1 },
+      { key: "delta_cents", label: `+${Math.round(best.diff)}¢ vs market`, weight: 2 },
+      { key: "book",        label: `Book ${best.book}`, weight: 1 },
     ],
   });
 }
@@ -197,7 +268,7 @@ function evFromFair(american, fairP) {
   return fairP * (dec - 1) - (1 - fairP);
 }
 
-/* ================================ UTILITIES ================================ */
+/* ================================= UTIL =================================== */
 function normalizeOffers(snap) {
   const out = [];
   const seen = new Set();
@@ -232,7 +303,7 @@ function finalizeAlert({
   sport, market, gameId, home, away, commence_time,
   source, score, tier, side, team, entryLine, priceBook, evPct, signals,
 }) {
-  // Dedupe / cooldown (30m). Only re-alert if price improved.
+  // Dedupe / cooldown (30m) — only re-alert if price improved
   const key = gameId || `${home}-${away}-${market}`;
   const now = Date.now();
   const prev = STATE[key];
@@ -243,11 +314,8 @@ function finalizeAlert({
     const cooldownMs = 30 * 60 * 1000;
     if (now - prev.ts < cooldownMs) {
       if (isFiniteNum(entryLine) && isFiniteNum(prev.entryLine)) {
-        if (americanBetter(entryLine, prev.entryLine)) {
-          type = "realert_plus";
-        } else {
-          allow = false;
-        }
+        if (americanBetter(entryLine, prev.entryLine)) type = "realert_plus";
+        else allow = false;
       } else {
         allow = false;
       }
@@ -280,7 +348,7 @@ function finalizeAlert({
       title: `SHARP ALERT – ${String(sport || "").toUpperCase()} ${away} @ ${home}`,
       emoji: type === "initial" ? "🚨" : type === "realert_plus" ? "🟢" : "🔁",
       strength: strengthEmoji,
-      tags: [source === "ev" ? "EV" : "Splits"],
+      tags: [source.toUpperCase()],
     },
     meta: { generated_at: new Date().toISOString() },
   };
@@ -289,18 +357,17 @@ function finalizeAlert({
 /* --------------------------------- Helpers -------------------------------- */
 function americanBetter(curr, prev) {
   if (!isFiniteNum(curr) || !isFiniteNum(prev)) return false;
-  // Dogs: higher is better; Favs: closer to zero (less negative) is better.
+  // Dogs: higher is better; Favs: less negative is better — both reduce to numeric ">"
   return curr > prev;
 }
+function fmtAm(a) { return a >= 0 ? `+${a}` : `${a}`; }
+function rankOutlier(tier) { return tier === "strong" ? 2 : 1; }
+
 function avg(arr) { let s = 0; for (const x of arr) s += x; return arr.length ? s / arr.length : NaN; }
+function median(arr) { const a = [...arr].sort((x,y)=>x-y); const n=a.length; if(!n) return NaN; const m=Math.floor(n/2); return n%2? a[m] : (a[m-1]+a[m])/2; }
 function isFiniteNum(x) { return Number.isFinite(Number(x)); }
 function num(x, def = undefined) { const n = Number(x); return Number.isFinite(n) ? n : def; }
 function envNum(k, def) { const n = Number(process.env[k]); return Number.isFinite(n) ? n : def; }
-function envBool(k, def) {
-  const v = process.env[k]; if (v == null) return def;
-  const s = String(v).toLowerCase();
-  if (["1","true","yes","y"].includes(s)) return true;
-  if (["0","false","no","n"].includes(s)) return false;
-  return def;
-}
+function envInt(k, def) { const n = parseInt(process.env[k], 10); return Number.isFinite(n) ? n : def; }
+function envBool(k, def) { const v = process.env[k]; if (v == null) return def; const s = String(v).toLowerCase(); if (["1","true","yes","y"].includes(s)) return true; if (["0","false","no","n"].includes(s)) return false; return def; }
 function diag(fn) { if (DIAG) { try { fn(); } catch {} } }

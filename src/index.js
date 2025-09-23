@@ -205,7 +205,7 @@ app.get("/api/scan/:sport", guard(async (req, res) => {
   if (!jobs.length) {
     return res.json({
       sport, limit, pulled: 0, analyzed: 0, sent_to_telegram: 0,
-      timestamp_et: nowET(), planned_jobs, alerts: [], note: "No jobs enabled via env for this sport."
+      timestamp_et: nowET(), planned_jobs: plannedJobs, alerts: [], note: "No jobs enabled via env for this sport."
     });
   }
 
@@ -243,7 +243,7 @@ app.get("/api/scan/:sport", guard(async (req, res) => {
     analyzed: analyzed.length,
     sent_to_telegram: sent,
     timestamp_et: nowET(),
-    planned_jobs, alerts: analyzed
+    planned_jobs: plannedJobs, alerts: analyzed
   });
 }));
 

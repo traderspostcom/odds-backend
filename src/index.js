@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 
 const HARD_KILL = flag("HARD_KILL", false);
 const SCAN_ENABLED = flag("SCAN_ENABLED", false);        // cron/auto (we're using manual calls)
-const AUTO_TELEGRAM = flag("AUTO_TELEGRAM", false);      // default OFF; test route can force send
+const AUTO_TELEGRAM = flag("AUTO_TELEGRAM", false);
 const DIAG = flag("DIAG", true);
 
 const MANUAL_MAX_JOBS = num("MANUAL_MAX_JOBS", 1);
@@ -47,9 +47,7 @@ if (HARD_KILL) {
   });
 
   /* ---------------------- Zero-credit Telegram test ping -------------------- */
-  // Usage:
-  //   GET /api/telegram/test?text=Hello&force=1
-  // Sends a message directly to Telegram WITHOUT touching Odds API.
+  // GET /api/telegram/test?text=Hello&force=1
   app.get("/api/telegram/test", async (req, res) => {
     try {
       const textRaw = (req.query.text ?? "🚨 TEST — Odds Backend Telegram wired 🔧 (safe mode)").toString();
@@ -64,62 +62,6 @@ if (HARD_KILL) {
         });
       }
 
-/* -------------------------- Mock scan → Telegram -------------------------- */
-// Usage:
-//   GET /api/scan/mock?telegram=true&force=1
-// Creates a synthetic sharp alert (no provider calls) and (optionally) sends it to Telegram.
-app.get("/api/scan/mock", async (req, res) => {
-  try {
-    const wantTelegram = toBool(req.query.telegram, false);
-    const force = toBool(req.query.force, false);
-
-    // Synthetic snapshot that passes the SPLITS gates (no provider / no credits)
-    const snapshot = {
-      sport: "nfl",
-      market: "NFL H2H",
-      gameId: `mock-${Date.now()}`,
-      home: "Mockers",
-      away: "Testers",
-      commence_time: new Date(Date.now() + 3 * 3600e3).toISOString(), // +3h
-      // SPLITS path fields (so analyzer doesn't need offers[])
-      tickets: 40,     // ≤ maxTicketsPct (45)
-      handle: 60,      // ≥ minHandlePct (55)
-      hold: 0.04,      // ≤ hold.max (0.05 default)
-      side: "home",
-      line: -105       // for re-alert comparisons in state
-    };
-
-    const alert = analyzeMarket(snapshot);
-    if (!alert) {
-      return res.status(200).json({
-        ok: true,
-        note: "mock_created_but_filtered",
-        detail: "Analyzer returned null. If this happens, your score thresholds are higher than mock score.",
-        snapshot
-      });
-    }
-
-    let sent = 0;
-    if (wantTelegram && (force || process.env.AUTO_TELEGRAM === "true")) {
-      const txt = formatAlertForTelegram(alert);
-      const result = await sendTelegram(txt);
-      if (result.ok) sent = 1;
-    }
-
-    return res.status(200).json({
-      ok: true,
-      sport: "nfl",
-      pulled: 1,
-      analyzed: 1,
-      sent_to_telegram: sent,
-      alert
-    });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: "mock_scan_failed", message: e?.message || String(e) });
-  }
-});
-
-      
       const send = await sendTelegram(text);
       return res.status(send.ok ? 200 : 400).json(send);
     } catch (e) {
@@ -127,10 +69,55 @@ app.get("/api/scan/mock", async (req, res) => {
     }
   });
 
+  /* -------------------------- Mock scan → Telegram -------------------------- */
+  // NOTE: This must be *above* /api/scan/:sport so it doesn't get captured as :sport=mock
+  // GET /api/scan/mock?telegram=true&force=1
+  app.get("/api/scan/mock", async (req, res) => {
+    try {
+      const wantTelegram = toBool(req.query.telegram, false);
+      const force = toBool(req.query.force, false);
+
+      // Synthetic snapshot that passes the SPLITS gates (no provider calls)
+      const snapshot = {
+        sport: "nfl",
+        market: "NFL H2H",
+        gameId: `mock-${Date.now()}`,
+        home: "Mockers",
+        away: "Testers",
+        commence_time: new Date(Date.now() + 3 * 3600e3).toISOString(), // +3h
+        // SPLITS fields (so analyzer doesn't need offers[])
+        tickets: 40,     // ≤ maxTicketsPct (45)
+        handle: 60,      // ≥ minHandlePct (55)
+        hold: 0.04,      // ≤ hold.max (0.05 default)
+        side: "home",
+        line: -105
+      };
+
+      const alert = analyzeMarket(snapshot);
+      let sent = 0;
+
+      if (alert && wantTelegram && (force || AUTO_TELEGRAM)) {
+        const txt = formatAlertForTelegram(alert);
+        const result = await sendTelegram(txt);
+        if (result.ok) sent = 1;
+      }
+
+      return res.status(200).json({
+        ok: true,
+        sport: "nfl",
+        pulled: 1,
+        analyzed: alert ? 1 : 0,
+        sent_to_telegram: sent,
+        alert: alert || null
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: "mock_scan_failed", message: e?.message || String(e) });
+    }
+  });
+
   /* ------------------------------ Manual scan ------------------------------ */
   // Supported: /api/scan/nfl?limit=5&telegram=false&dryrun=true
-  // NOTE: This route still honors all your safety gates. With ODDS_API_ENABLED=false
-  // in fetchers, calling it will NOT hit the provider.
+  // With ODDS_API_ENABLED=false in fetchers, this route does NOT hit the provider.
   app.get("/api/scan/:sport", async (req, res) => {
     try {
       const sport = String(req.params.sport || "").toLowerCase();
@@ -142,6 +129,7 @@ app.get("/api/scan/mock", async (req, res) => {
         return res.status(400).json({ error: "unsupported_sport", sport });
       }
 
+      // plan jobs for this sport with current toggles
       const planned_jobs = [];
       if (sport === "nfl" && ENABLE_NFL_H2H) planned_jobs.push("NFL H2H");
 
@@ -150,11 +138,11 @@ app.get("/api/scan/mock", async (req, res) => {
       }
 
       if (dryrun) {
-        // No provider calls; just show plan
+        // Just show what we'd run — no provider calls
         return res.json(summary({ sport, limit, pulled: 0, analyzed: 0, sent: 0, planned_jobs }));
       }
 
-      // Execute with strict clamps
+      // execute with strict safety clamps
       const jobsToRun = planned_jobs.slice(0, Math.min(MANUAL_MAX_JOBS, MAX_JOBS_PER_SPORT));
       let pulled = 0;
       let analyzed = 0;
@@ -237,7 +225,7 @@ function formatAlertForTelegram(a) {
   const evLine = ev ? `• EV: ${ev.label}` : "";
   return [
     `🚨 <b>${title}</b>`,
-    `${strength} ${price}`,
+    `${strength}${price}`,
     side,
     src,
     evLine,

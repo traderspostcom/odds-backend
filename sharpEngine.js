@@ -362,18 +362,18 @@ function analyzeWithOutliersUpgraded(all, target, nonTarget, meta, { bypassDedup
     if (Math.round(b.diff)!==Math.round(a.diff)) return Math.round(b.diff)-Math.round(a.diff);
     return (b.evFrac - a.evFrac);
   });
-  const best = results[0];
-  const { meta, side, team, tier, price, book, evFrac, signals } = best;
+const best = results[0];
+const { side, team, tier, price, book, evFrac, signals } = best;
 
-  return finalizeAlert({
-    ...meta,
-    source: "outlier",
-    score: Math.round(best.diff),
-    tier, side, team,
-    entryLine: price, priceBook: book, evPct: evFrac,
-    signals,
-    bypassDedupe: false,
-  });
+return finalizeAlert({
+  ...best.meta, // <- use meta from best without redeclaring
+  source: "outlier",
+  score: Math.round(best.diff),
+  tier, side, team,
+  entryLine: price, priceBook: book, evPct: evFrac,
+  signals,
+  bypassDedupe: false,
+});
 }
 
 /* ====================== HISTORY (steam / resistance) ====================== */

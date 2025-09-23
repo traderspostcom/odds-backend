@@ -161,6 +161,36 @@ app.get("/api/debug/snapshot/:sport", guard(async (req, res) => {
   });
 }));
 
+// ---------- DEBUG: run analyzer on one normalized snapshot ----------
+app.get("/api/debug/analyze/:sport", guard(async (req, res) => {
+  const sport = String(req.params.sport || "").toLowerCase();
+  const limit = Number(req.query.limit || 1);
+  const bypass = req.query.bypass === "1";
+
+  // pick fetcher
+  let fetcher = null;
+  if (sport === "nfl") fetcher = getNFLH2HNormalized;
+  else if (sport === "mlb") fetcher = getMLBH2HNormalized;
+  else if (sport === "ncaaf") fetcher = getNCAAFH2HNormalized;
+  else return res.status(400).json({ ok: false, error: "unsupported_sport" });
+
+  const snaps = await fetcher({ limit });
+  const snap = Array.isArray(snaps) && snaps.length ? snaps[0] : null;
+
+  // run analyzer (same call path as scans)
+  const analysis = snap ? analyzeMarket(snap, { bypassDedupe: bypass }) : null;
+
+  res.json({
+    ok: true,
+    sport,
+    limit,
+    has_snapshot: Boolean(snap),
+    snapshot_keys: snap ? Object.keys(snap) : [],
+    analysis_null: analysis === null,
+    analysis, // if non-null, you’ll see render/title/signals etc.
+  });
+}));
+
 
 app.get("/api/scan/mock", guard(async (req, res) => {
   const telegram = req.query.telegram === "true";

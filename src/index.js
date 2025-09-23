@@ -4,16 +4,12 @@ import express from "express";
 import cors from "cors";
 
 import {
-  // existing
   getNFLH2HNormalized,
-  // new
   getMLBH2HNormalized,
   getNCAAFH2HNormalized,
-  // diag
   diagListBooksForSport,
 } from "./fetchers.js";
 
-// sharp engine is at repo root
 import { analyzeMarket } from "../sharpEngine.js";
 
 const app = express();
@@ -38,45 +34,41 @@ function envSnapshot() {
   } = process.env;
 
   return {
-    HARD_KILL: BOOL(HARD_KILL),
-    SCAN_ENABLED: BOOL(SCAN_ENABLED),
-    AUTO_TELEGRAM: BOOL(AUTO_TELEGRAM),
-    DIAG: BOOL(DIAG),
+    HARD_KILL:        BOOL(HARD_KILL),
+    SCAN_ENABLED:     BOOL(SCAN_ENABLED),
+    AUTO_TELEGRAM:    BOOL(AUTO_TELEGRAM),
+    DIAG:             BOOL(DIAG),
 
-    MANUAL_MAX_JOBS: Number(MANUAL_MAX_JOBS || 1),
-    MAX_JOBS_PER_SPORT: Number(MAX_JOBS_PER_SPORT || 1),
-    MAX_EVENTS_PER_CALL: Number(MAX_EVENTS_PER_CALL || 3),
+    MANUAL_MAX_JOBS:  Number(MANUAL_MAX_JOBS || 1),
+    MAX_JOBS_PER_SPORT:Number(MAX_JOBS_PER_SPORT || 1),
+    MAX_EVENTS_PER_CALL:Number(MAX_EVENTS_PER_CALL || 3),
 
-    // markets (only ones we care about live)
-    ENABLE_NFL_H2H: BOOL(ENABLE_NFL_H2H),
-    ENABLE_NFL_H1: BOOL(ENABLE_NFL_H1),
+    ENABLE_NFL_H2H:   BOOL(ENABLE_NFL_H2H),
+    ENABLE_NFL_H1:    BOOL(ENABLE_NFL_H1),
 
-    ENABLE_MLB_H2H: BOOL(ENABLE_MLB_H2H),
-    ENABLE_MLB_F5_H2H: BOOL(ENABLE_MLB_F5_H2H),
+    ENABLE_MLB_H2H:   BOOL(ENABLE_MLB_H2H),
+    ENABLE_MLB_F5_H2H:BOOL(ENABLE_MLB_F5_H2H),
 
     ENABLE_NCAAF_H2H: BOOL(ENABLE_NCAAF_H2H),
     ENABLE_NCAAF_SPREADS: BOOL(ENABLE_NCAAF_SPREADS),
-    ENABLE_NCAAF_TOTALS: BOOL(ENABLE_NCAAF_TOTALS),
+    ENABLE_NCAAF_TOTALS:  BOOL(ENABLE_NCAAF_TOTALS),
 
-    // provider + books
     ODDS_API_ENABLED: BOOL(ODDS_API_ENABLED),
     ODDS_API_KEY_present: Boolean(process.env.ODDS_API_KEY?.length > 0),
     ODDS_API_REGION: String(ODDS_API_REGION || "us"),
     BOOKS_WHITELIST: String(BOOKS_WHITELIST || "pinnacle,draftkings,betmgm,fanduel,caesars,bet365"),
-    ALERT_BOOKS: String(ALERT_BOOKS || "pinnacle"),
+    ALERT_BOOKS:     String(ALERT_BOOKS || "pinnacle"),
 
-    // thresholds
-    LEAN_THRESHOLD: Number(LEAN_THRESHOLD || 0.015),
-    STRONG_THRESHOLD: Number(STRONG_THRESHOLD || 0.035),
-    OUTLIER_DOG_CENTS_LEAN: Number(OUTLIER_DOG_CENTS_LEAN || 12),
-    OUTLIER_DOG_CENTS_STRONG: Number(OUTLIER_DOG_CENTS_STRONG || 18),
-    OUTLIER_FAV_CENTS_LEAN: Number(OUTLIER_FAV_CENTS_LEAN || 8),
-    OUTLIER_FAV_CENTS_STRONG: Number(OUTLIER_FAV_CENTS_STRONG || 12),
+    LEAN_THRESHOLD:  Number(LEAN_THRESHOLD || 0.015),
+    STRONG_THRESHOLD:Number(STRONG_THRESHOLD || 0.035),
+    OUTLIER_DOG_CENTS_LEAN:  Number(OUTLIER_DOG_CENTS_LEAN || 12),
+    OUTLIER_DOG_CENTS_STRONG:Number(OUTLIER_DOG_CENTS_STRONG || 18),
+    OUTLIER_FAV_CENTS_LEAN:  Number(OUTLIER_FAV_CENTS_LEAN || 8),
+    OUTLIER_FAV_CENTS_STRONG:Number(OUTLIER_FAV_CENTS_STRONG || 12),
 
-    // clamps
-    RETRY_429_MAX: Number(RETRY_429_MAX || 0),
-    RATE_LIMIT_MS: Number(RATE_LIMIT_MS || 1200),
-    CACHE_TTL_SECONDS: Number(CACHE_TTL_SECONDS || 30),
+    RETRY_429_MAX:   Number(RETRY_429_MAX || 0),
+    RATE_LIMIT_MS:   Number(RATE_LIMIT_MS || 1200),
+    CACHE_TTL_SECONDS:Number(CACHE_TTL_SECONDS || 30),
 
     TELEGRAM_CHAT_ID: TELEGRAM_CHAT_ID || "",
   };
@@ -126,7 +118,6 @@ app.get("/api/telegram/test", guard(async (req, res) => {
   res.json({ ok: true, status: 200, body: data });
 }));
 
-// diag: list books per game
 app.get("/api/diag/scan/:sport", guard(async (req, res) => {
   const sport = String(req.params.sport || "").toLowerCase();
   const limit = Number(req.query.limit || process.env.MAX_EVENTS_PER_CALL || 3);
@@ -145,7 +136,6 @@ app.get("/api/diag/scan/:sport", guard(async (req, res) => {
   });
 }));
 
-// mock scan (no credits)
 app.get("/api/scan/mock", guard(async (req, res) => {
   const telegram = req.query.telegram === "true";
   const force = req.query.force === "1";
@@ -181,7 +171,6 @@ app.get("/api/scan/mock", guard(async (req, res) => {
   });
 }));
 
-// main scan
 app.get("/api/scan/:sport", guard(async (req, res) => {
   const sport = String(req.params.sport || "").toLowerCase();
   const limit = Number(req.query.limit || process.env.MAX_EVENTS_PER_CALL || 3);
@@ -205,11 +194,12 @@ app.get("/api/scan/:sport", guard(async (req, res) => {
   if (!jobs.length) {
     return res.json({
       sport, limit, pulled: 0, analyzed: 0, sent_to_telegram: 0,
-      timestamp_et: nowET(), planned_jobs: plannedJobs, alerts: [], note: "No jobs enabled via env for this sport."
+      timestamp_et: nowET(), planned_jobs: plannedJobs, alerts: [],
+      note: "No jobs enabled via env for this sport."
     });
   }
 
-  // fetch snapshots
+  // fetch
   const snapshots = [];
   for (const job of jobs) {
     const got = await job({ limit });

@@ -9,16 +9,16 @@ const PORT = process.env.PORT || 3000;
 
 const HARD_KILL = flag("HARD_KILL", false);
 const SCAN_ENABLED = flag("SCAN_ENABLED", false);        // cron/auto (unused here)
-const AUTO_TELEGRAM = flag("AUTO_TELEGRAM", false);      // default OFF; test & mock can force
+const AUTO_TELEGRAM = flag("AUTO_TELEGRAM", false);
 const DIAG = flag("DIAG", true);
 
 const MANUAL_MAX_JOBS = num("MANUAL_MAX_JOBS", 1);
 const MAX_JOBS_PER_SPORT = num("MAX_JOBS_PER_SPORT", 1);
-const MAX_EVENTS_PER_CALL = num("MAX_EVENTS_PER_CALL", 1); // fetchers honor this
+const MAX_EVENTS_PER_CALL = num("MAX_EVENTS_PER_CALL", 1);
 
 const ENABLE_NFL_H2H = flag("ENABLE_NFL_H2H", true);
 
-/* -------- provider/env bits we’ll also expose in health & diagnostics ------- */
+/* -------- provider/env bits we expose in health & diagnostics ------------- */
 const ODDS_API_ENABLED = flag("ODDS_API_ENABLED", false);
 const ODDS_API_KEY = process.env.ODDS_API_KEY || "";
 const ODDS_API_REGION = (process.env.ODDS_API_REGION || "us").toString();
@@ -49,7 +49,7 @@ if (HARD_KILL) {
         MAX_JOBS_PER_SPORT,
         MAX_EVENTS_PER_CALL,
         ENABLE_NFL_H2H,
-        // extra visibility for current debugging
+        // extra visibility
         ODDS_API_ENABLED,
         ODDS_API_KEY_present: Boolean(ODDS_API_KEY),
         ODDS_API_REGION,
@@ -61,8 +61,10 @@ if (HARD_KILL) {
   });
 
   /* --------------------------- Provider diagnostics ------------------------- */
-  // GET /diag/provider  -> pings The Odds API /v4/sports (free) to validate the key
-  app.get("/diag/provider", async (_req, res) => {
+  // Alias both paths so typos can't bite us
+  app.get(["/diag/provider", "/api/diag/provider"], providerDiagHandler);
+
+  async function providerDiagHandler(_req, res) {
     try {
       if (!ODDS_API_ENABLED) {
         return res.json({
@@ -80,11 +82,18 @@ if (HARD_KILL) {
         });
       }
 
-      const url = `https://api.the-odds-api.com/v4/sports?apiKey=${encodeURIComponent(ODDS_API_KEY)}`;
+      // This endpoint is free on The Odds API; safe to call for key validation
+      const url = `https://api.the-odds-api.com/v4/sports?apiKey=${encodeURIComponent(
+        ODDS_API_KEY
+      )}`;
       const r = await fetch(url, { method: "GET" });
       const text = await r.text();
       let body;
-      try { body = JSON.parse(text); } catch { body = text; }
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = text;
+      }
 
       return res.status(r.ok ? 200 : 400).json({
         ok: r.ok,
@@ -93,12 +102,14 @@ if (HARD_KILL) {
         region: ODDS_API_REGION,
         books_whitelist: BOOKS_WHITELIST,
         alert_books: ALERT_BOOKS,
-        response_sample: Array.isArray(body) ? body.slice(0, 3) : body, // trim big lists
+        response_sample: Array.isArray(body) ? body.slice(0, 3) : body,
       });
     } catch (e) {
-      return res.status(500).json({ ok: false, error: "provider_diag_failed", message: e?.message || String(e) });
+      return res
+        .status(500)
+        .json({ ok: false, error: "provider_diag_failed", message: e?.message || String(e) });
     }
-  });
+  }
 
   /* ---------------------- Zero-credit Telegram test ping -------------------- */
   // GET /api/telegram/test?text=Hello&force=1
@@ -106,7 +117,7 @@ if (HARD_KILL) {
     try {
       const textRaw =
         (req.query.text ?? "🚨 TEST — Odds Backend Telegram wired 🔧 (safe mode)").toString();
-      const text = textRaw.slice(0, 3600); // Telegram limit safety
+      const text = textRaw.slice(0, 3600);
       const force = toBool(req.query.force, false);
 
       if (!AUTO_TELEGRAM && !force) {
@@ -127,7 +138,7 @@ if (HARD_KILL) {
   });
 
   /* -------------------------- Mock scan → Telegram -------------------------- */
-  // NOTE: keep above /api/scan/:sport
+  // MUST be above /api/scan/:sport to avoid :sport=mock capture
   // GET /api/scan/mock?telegram=true&force=1
   app.get("/api/scan/mock", async (req, res) => {
     try {
@@ -150,11 +161,11 @@ if (HARD_KILL) {
         side: "home",
         line: -105,
 
-        // EV path: 3-book market with a clear edge at Pinnacle (default ALERT_BOOKS)
+        // EV path: 3-book market with a clear edge at Pinnacle
         offers: [
-          { book: "pinnacle",    prices: { home: { american: 120 }, away: { american: -130 } } },
-          { book: "draftkings",  prices: { home: { american: 105 }, away: { american: -115 } } },
-          { book: "betmgm",      prices: { home: { american: 105 }, away: { american: -115 } } },
+          { book: "pinnacle",   prices: { home: { american: 120 }, away: { american: -130 } } },
+          { book: "draftkings", prices: { home: { american: 105 }, away: { american: -115 } } },
+          { book: "betmgm",     prices: { home: { american: 105 }, away: { american: -115 } } },
         ],
       };
 
@@ -187,7 +198,6 @@ if (HARD_KILL) {
 
   /* ------------------------------ Manual scan ------------------------------ */
   // GET /api/scan/nfl?limit=1&telegram=true
-  // If ODDS_API_ENABLED=false (in env/fetchers), this does NOT hit the provider.
   app.get("/api/scan/:sport", async (req, res) => {
     try {
       const sport = String(req.params.sport || "").toLowerCase();

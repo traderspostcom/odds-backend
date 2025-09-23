@@ -1,6 +1,6 @@
 // sharpEngine.js (root)
-// Hybrid splits + EV analyzer with ALERT_BOOKS wildcard support.
-// No external config dependency — driven by environment variables only.
+// Hybrid analyzer: use splits if present; otherwise EV fallback (multi-book).
+// Driven by env vars only; no config import.
 
 import fs from "fs";
 
@@ -8,10 +8,10 @@ import fs from "fs";
 const DIAG = envBool("DIAG", true);
 
 // EV thresholds (fractions: 0.01 = 1%)
-const LEAN_THRESHOLD = envNum("LEAN_THRESHOLD", 0.015);
-const STRONG_THRESHOLD = envNum("STRONG_THRESHOLD", 0.030);
+const LEAN_THRESHOLD = envNum("LEAN_THRESHOLD", 0.005);   // 0.5% default
+const STRONG_THRESHOLD = envNum("STRONG_THRESHOLD", 0.010); // 1.0% default
 
-// Books to alert on. Supports "*" for "any".
+// Which books to alert on. Supports "*" for "any".
 const RAW_ALERT_BOOKS = (process.env.ALERT_BOOKS || "pinnacle")
   .split(",")
   .map((s) => s.trim().toLowerCase())
@@ -19,7 +19,7 @@ const RAW_ALERT_BOOKS = (process.env.ALERT_BOOKS || "pinnacle")
 const ALERT_ALL = RAW_ALERT_BOOKS.includes("*");
 const ALERT_BOOKS = RAW_ALERT_BOOKS.filter((b) => b !== "*");
 
-// Re-alert state
+// Re-alert / dedupe state
 const STATE_FILE = process.env.SHARP_STATE_FILE || "./sharp_state.json";
 let STATE = {};
 try {
@@ -48,42 +48,42 @@ export function analyzeMarket(snapshot) {
   const away = snapshot.away;
   const commence_time = snapshot.commence_time || null;
 
-  // 1) If splits are present (tickets/handle), try split path.
+  // 1) Splits path if tickets/handle are present
   if (hasSplits(snapshot)) {
-    const a = analyzeWithSplits(snapshot, { sport, market, gameId, home, away, commence_time });
-    if (a) return a;
+    const alert = analyzeWithSplits(snapshot, { sport, market, gameId, home, away, commence_time });
+    if (alert) return alert;
   }
 
-  // 2) EV fallback requires ≥ 2 books (consensus)
+  // 2) EV fallback (needs >= 2 books)
   const offers = normalizeOffers(snapshot);
   if (offers.length < 2) {
-    diag(() =>
-      console.log(`diag[EV] ${away} @ ${home} | offers=${offers.length} (need ≥2)`)
-    );
+    diag(() => console.log(`diag[EV] ${away} @ ${home} | offers=${offers.length} (need ≥2)`));
     return null;
   }
+
   return analyzeWithEV(offers, { sport, market, gameId, home, away, commence_time });
 }
 
 /* ------------------------------- SPLITS PATH ------------------------------- */
 function analyzeWithSplits(s, meta) {
-  // Basic gates
+  // Normalize
   const tickets = num(s.tickets);
   const handle = num(s.handle);
   const hold = num(s.hold, null);
+  if (!isFiniteNum(tickets) || !isFiniteNum(handle)) return null;
 
   const tPct = tickets > 1 ? tickets : tickets * 100;
   const hPct = handle > 1 ? handle : handle * 100;
   const gapPct = hPct - tPct;
 
-  // Default split rules
+  // Rules
   const rules = { maxTicketsPct: 45, minHandlePct: 55, minGap: 10, maxHold: 7, prefHold: 5 };
   if (tPct > rules.maxTicketsPct) return null;
   if (hPct < rules.minHandlePct) return null;
   if (gapPct < rules.minGap) return null;
   if (hold != null && hold > rules.maxHold / 100) return null;
 
-  // Score (very simple)
+  // Score
   let score = 0;
   if (gapPct >= rules.minGap) score += 2;
   if (hold == null || hold <= rules.prefHold / 100) score += 1;
@@ -91,11 +91,9 @@ function analyzeWithSplits(s, meta) {
   const tier = score >= 3 ? "strong" : score >= 2 ? "lean" : "pass";
   if (tier === "pass") return null;
 
-  // Build alert (no devig here)
   const line = s.line ?? null;
   const side = s.side || (hPct >= tPct ? "home" : "away");
   const team = side === "home" ? meta.home : meta.away;
-  const emo = tier === "strong" ? "🟢 Strong" : "🟡 Lean";
 
   return finalizeAlert({
     ...meta,
@@ -116,74 +114,48 @@ function analyzeWithSplits(s, meta) {
 
 /* -------------------------------- EV PATH --------------------------------- */
 function analyzeWithEV(offers, meta) {
-  // Split offers into target and consensus sets
+  // Separate target vs consensus
   const all = offers;
   const target = ALERT_ALL ? all : all.filter((o) => ALERT_BOOKS.includes(o.book));
-  const consensus = ALERT_ALL
-    ? all
-    : all.filter((o) => !ALERT_BOOKS.includes(o.book));
+  const consensusPool = ALERT_ALL ? all : all.filter((o) => !ALERT_BOOKS.includes(o.book));
 
   if (target.length === 0) {
-    diag(() =>
-      console.log(
-        `diag[EV] ${meta.away} @ ${meta.home} | no target offers under ALERT_BOOKS=[${ALERT_BOOKS.join(
-          ","
-        )}]`
-      )
-    );
+    diag(() => console.log(`diag[EV] ${meta.away} @ ${meta.home} | no target offers under ALERT_BOOKS=[${ALERT_BOOKS.join(",")}]`));
     return null;
   }
-  if (consensus.length < 1) {
-    // allow ALERT_ALL scenario to use all books both for consensus and target
-    if (!ALERT_ALL) {
-      diag(() =>
-        console.log(`diag[EV] ${meta.away} @ ${meta.home} | consensus < 1`)
-      );
-      return null;
-    }
-  }
+  const consensus = consensusPool.length ? consensusPool : all; // allow ALERT_ALL case
 
-  // Build fair (devig) from consensus
-  const fair = buildFairFromConsensus(ALERT_ALL ? all : consensus);
+  // Build fair (per-book devig → average)
+  const fair = buildFairFrom(consensus);
   if (!fair) return null;
 
-  // Evaluate EV for each target book/side
+  // Evaluate EV for each side at each target book
   let best = null;
   for (const o of target) {
-    const pxH = o.home;
-    const pxA = o.away;
-    if (isFiniteNum(pxH)) {
-      const evH = evFromFair(pxH, fair.pHome);
-      if (!best || evH > best.evPct) best = { side: "home", price: pxH, book: o.book, evPct: evH };
+    if (isFiniteNum(o.home)) {
+      const evH = evFromFair(o.home, fair.pHome);
+      if (!best || evH > best.evPct) best = { side: "home", price: o.home, book: o.book, evPct: evH };
     }
-    if (isFiniteNum(pxA)) {
-      const evA = evFromFair(pxA, 1 - fair.pHome);
-      if (!best || evA > best.evPct) best = { side: "away", price: pxA, book: o.book, evPct: evA };
+    if (isFiniteNum(o.away)) {
+      const evA = evFromFair(o.away, 1 - fair.pHome);
+      if (!best || evA > best.evPct) best = { side: "away", price: o.away, book: o.book, evPct: evA };
     }
   }
   if (!best) return null;
 
-  // Threshold gates
   const ev = best.evPct;
   const tier = ev >= STRONG_THRESHOLD ? "strong" : ev >= LEAN_THRESHOLD ? "lean" : "pass";
   if (tier === "pass") {
-    diag(() =>
-      console.log(
-        `diag[EV] ${meta.away} @ ${meta.home} | best EV ${(ev * 100).toFixed(
-          2
-        )}% below threshold`
-      )
-    );
+    diag(() => console.log(`diag[EV] ${meta.away} @ ${meta.home} | best EV ${(ev * 100).toFixed(2)}% below threshold`));
     return null;
   }
 
   const team = best.side === "home" ? meta.home : meta.away;
-  const emo = tier === "strong" ? "🟢 Strong" : "🟡 Lean";
 
   return finalizeAlert({
     ...meta,
     source: "ev",
-    score: Math.round(ev * 1000) / 10, // EV in bps for quick view
+    score: Math.round(ev * 10000) / 100, // EV% to 2dp
     tier,
     side: best.side,
     team,
@@ -199,16 +171,16 @@ function analyzeWithEV(offers, meta) {
   });
 }
 
-/* ----------------------------- FAIR PRICE MATH ----------------------------- */
-function buildFairFromConsensus(consensusOffers) {
+/* ----------------------------- EV / FAIR MATH ------------------------------ */
+function buildFairFrom(consensusOffers) {
   const rows = [];
   for (const o of consensusOffers) {
     if (!isFiniteNum(o.home) || !isFiniteNum(o.away)) continue;
     const pH_raw = impliedFromAmerican(o.home);
     const pA_raw = impliedFromAmerican(o.away);
-    const s = pH_raw + pA_raw;
-    if (s <= 0) continue;
-    const pH = pH_raw / s; // remove vig within book
+    const sum = pH_raw + pA_raw;
+    if (sum <= 0) continue;
+    const pH = pH_raw / sum; // devig within book
     rows.push(pH);
   }
   if (rows.length === 0) return null;
@@ -218,11 +190,8 @@ function buildFairFromConsensus(consensusOffers) {
 
 function evFromFair(american, fairP) {
   const dec = americanToDecimal(american);
-  // EV per $1 stake
-  // win: fairP * (dec - 1); lose: (1 - fairP) * 1
-  // EV = fairP*(dec-1) - (1 - fairP)
-  const ev = fairP * (dec - 1) - (1 - fairP);
-  return ev; // as a fraction (0.02 = 2%)
+  // EV per $1 stake: fairP*(dec-1) - (1 - fairP)
+  return fairP * (dec - 1) - (1 - fairP);
 }
 
 /* --------------------------------- HELPERS -------------------------------- */
@@ -257,23 +226,10 @@ function impliedFromAmerican(a) {
 }
 
 function finalizeAlert({
-  sport,
-  market,
-  gameId,
-  home,
-  away,
-  commence_time,
-  source,
-  score,
-  tier,
-  side,
-  team,
-  entryLine,
-  priceBook,
-  evPct,
-  signals,
+  sport, market, gameId, home, away, commence_time,
+  source, score, tier, side, team, entryLine, priceBook, evPct, signals,
 }) {
-  // dedupe / re-alert throttle (simple: 30 min)
+  // simple dedupe/cooldown (30m)
   const key = gameId || `${home}-${away}-${market}`;
   const now = Date.now();
   const prev = STATE[key];
@@ -282,12 +238,10 @@ function finalizeAlert({
 
   if (prev) {
     const cooldownMs = 30 * 60 * 1000;
-    const expired = now - prev.ts > cooldownMs;
-    if (!expired) {
+    if (now - prev.ts < cooldownMs) {
       // only re-alert if price improved
-      if (entryLine != null && prev.entryLine != null) {
-        const improved = americanBetter(entryLine, prev.entryLine);
-        if (improved) {
+      if (isFiniteNum(entryLine) && isFiniteNum(prev.entryLine)) {
+        if (americanBetter(entryLine, prev.entryLine)) {
           type = "realert_plus";
         } else {
           allow = false;
@@ -297,7 +251,6 @@ function finalizeAlert({
       }
     }
   }
-
   if (!allow) return null;
 
   STATE[key] = { ts: now, entryLine: entryLine ?? null, side };
@@ -327,44 +280,26 @@ function finalizeAlert({
       strength: strengthEmoji,
       tags: [source === "ev" ? "EV" : "Splits"],
     },
-    meta: {
-      generated_at: new Date().toISOString(),
-    },
+    meta: { generated_at: new Date().toISOString() },
   };
 }
 
 function americanBetter(curr, prev) {
   if (!isFiniteNum(curr) || !isFiniteNum(prev)) return false;
-  // For dogs (positive): higher is better. For favs (negative): less negative (closer to 0) is better.
+  // Dogs: higher is better; Favs: closer to zero is better
   if (prev >= 0) return curr > prev;
   return curr > prev; // -110 > -120
 }
 
-function avg(arr) {
-  if (!arr.length) return NaN;
-  let s = 0;
-  for (const x of arr) s += x;
-  return s / arr.length;
-}
-function isFiniteNum(x) {
-  return Number.isFinite(Number(x));
-}
-function num(x, def = undefined) {
-  const n = Number(x);
-  return Number.isFinite(n) ? n : def;
-}
-function envNum(k, def) {
-  const n = Number(process.env[k]);
-  return Number.isFinite(n) ? n : def;
-}
+function avg(arr) { let s = 0; for (const x of arr) s += x; return arr.length ? s / arr.length : NaN; }
+function isFiniteNum(x) { return Number.isFinite(Number(x)); }
+function num(x, def = undefined) { const n = Number(x); return Number.isFinite(n) ? n : def; }
+function envNum(k, def) { const n = Number(process.env[k]); return Number.isFinite(n) ? n : def; }
 function envBool(k, def) {
-  const v = process.env[k];
-  if (v == null) return def;
+  const v = process.env[k]; if (v == null) return def;
   const s = String(v).toLowerCase();
-  if (["1", "true", "yes", "y"].includes(s)) return true;
-  if (["0", "false", "no", "n"].includes(s)) return false;
+  if (["1","true","yes","y"].includes(s)) return true;
+  if (["0","false","no","n"].includes(s)) return false;
   return def;
 }
-function diag(fn) {
-  if (DIAG) try { fn(); } catch {}
-}
+function diag(fn) { if (DIAG) { try { fn(); } catch {} } }

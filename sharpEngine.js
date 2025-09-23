@@ -53,7 +53,15 @@ function saveState() {
 /* -------------------------------------------------------------------------- */
 export function analyzeMarket(snapshot) {
   if (!snapshot || typeof snapshot !== "object") return null;
+  
+diag(() => {
+  const books = uniqBooks(offers);
+  console.log(
+    `diag[EV] ${away} @ ${home} | market=${market} | offers=${offers.length} | books=[${books.join(", ")}] | alertBooks=[${TARGET_ALERT_BOOKS.join(", ")}]`
+  );
+});
 
+  
   // Common fields we try to use when present
   const {
     sport,

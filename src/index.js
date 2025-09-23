@@ -3,6 +3,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 
+// Fetchers (normalized snapshots)
 import {
   getNFLH2HNormalized,
   getMLBH2HNormalized,
@@ -10,6 +11,7 @@ import {
   diagListBooksForSport,
 } from "./fetchers.js";
 
+// Sharp analyzer (repo root)
 import { analyzeMarket } from "../sharpEngine.js";
 
 const app = express();
@@ -34,41 +36,47 @@ function envSnapshot() {
   } = process.env;
 
   return {
-    HARD_KILL:        BOOL(HARD_KILL),
-    SCAN_ENABLED:     BOOL(SCAN_ENABLED),
-    AUTO_TELEGRAM:    BOOL(AUTO_TELEGRAM),
-    DIAG:             BOOL(DIAG),
+    // master toggles
+    HARD_KILL: BOOL(HARD_KILL),
+    SCAN_ENABLED: BOOL(SCAN_ENABLED),
+    AUTO_TELEGRAM: BOOL(AUTO_TELEGRAM),
+    DIAG: BOOL(DIAG),
 
-    MANUAL_MAX_JOBS:  Number(MANUAL_MAX_JOBS || 1),
-    MAX_JOBS_PER_SPORT:Number(MAX_JOBS_PER_SPORT || 1),
-    MAX_EVENTS_PER_CALL:Number(MAX_EVENTS_PER_CALL || 3),
+    // clamps
+    MANUAL_MAX_JOBS: Number(MANUAL_MAX_JOBS || 1),
+    MAX_JOBS_PER_SPORT: Number(MAX_JOBS_PER_SPORT || 1),
+    MAX_EVENTS_PER_CALL: Number(MAX_EVENTS_PER_CALL || 3),
 
-    ENABLE_NFL_H2H:   BOOL(ENABLE_NFL_H2H),
-    ENABLE_NFL_H1:    BOOL(ENABLE_NFL_H1),
+    // markets we care about
+    ENABLE_NFL_H2H: BOOL(ENABLE_NFL_H2H),
+    ENABLE_NFL_H1: BOOL(ENABLE_NFL_H1),
 
-    ENABLE_MLB_H2H:   BOOL(ENABLE_MLB_H2H),
-    ENABLE_MLB_F5_H2H:BOOL(ENABLE_MLB_F5_H2H),
+    ENABLE_MLB_H2H: BOOL(ENABLE_MLB_H2H),
+    ENABLE_MLB_F5_H2H: BOOL(ENABLE_MLB_F5_H2H),
 
     ENABLE_NCAAF_H2H: BOOL(ENABLE_NCAAF_H2H),
     ENABLE_NCAAF_SPREADS: BOOL(ENABLE_NCAAF_SPREADS),
-    ENABLE_NCAAF_TOTALS:  BOOL(ENABLE_NCAAF_TOTALS),
+    ENABLE_NCAAF_TOTALS: BOOL(ENABLE_NCAAF_TOTALS),
 
+    // provider + books
     ODDS_API_ENABLED: BOOL(ODDS_API_ENABLED),
     ODDS_API_KEY_present: Boolean(process.env.ODDS_API_KEY?.length > 0),
     ODDS_API_REGION: String(ODDS_API_REGION || "us"),
     BOOKS_WHITELIST: String(BOOKS_WHITELIST || "pinnacle,draftkings,betmgm,fanduel,caesars,bet365"),
-    ALERT_BOOKS:     String(ALERT_BOOKS || "pinnacle"),
+    ALERT_BOOKS: String(ALERT_BOOKS || "pinnacle"),
 
-    LEAN_THRESHOLD:  Number(LEAN_THRESHOLD || 0.015),
-    STRONG_THRESHOLD:Number(STRONG_THRESHOLD || 0.035),
-    OUTLIER_DOG_CENTS_LEAN:  Number(OUTLIER_DOG_CENTS_LEAN || 12),
-    OUTLIER_DOG_CENTS_STRONG:Number(OUTLIER_DOG_CENTS_STRONG || 18),
-    OUTLIER_FAV_CENTS_LEAN:  Number(OUTLIER_FAV_CENTS_LEAN || 8),
-    OUTLIER_FAV_CENTS_STRONG:Number(OUTLIER_FAV_CENTS_STRONG || 12),
+    // thresholds
+    LEAN_THRESHOLD: Number(LEAN_THRESHOLD || 0.015),
+    STRONG_THRESHOLD: Number(STRONG_THRESHOLD || 0.035),
+    OUTLIER_DOG_CENTS_LEAN: Number(OUTLIER_DOG_CENTS_LEAN || 12),
+    OUTLIER_DOG_CENTS_STRONG: Number(OUTLIER_DOG_CENTS_STRONG || 18),
+    OUTLIER_FAV_CENTS_LEAN: Number(OUTLIER_FAV_CENTS_LEAN || 8),
+    OUTLIER_FAV_CENTS_STRONG: Number(OUTLIER_FAV_CENTS_STRONG || 12),
 
-    RETRY_429_MAX:   Number(RETRY_429_MAX || 0),
-    RATE_LIMIT_MS:   Number(RATE_LIMIT_MS || 1200),
-    CACHE_TTL_SECONDS:Number(CACHE_TTL_SECONDS || 30),
+    // pacing
+    RETRY_429_MAX: Number(RETRY_429_MAX || 0),
+    RATE_LIMIT_MS: Number(RATE_LIMIT_MS || 1200),
+    CACHE_TTL_SECONDS: Number(CACHE_TTL_SECONDS || 30),
 
     TELEGRAM_CHAT_ID: TELEGRAM_CHAT_ID || "",
   };
@@ -81,20 +89,31 @@ async function sendTelegram(text) {
 
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
   const body = { chat_id: chatId, text, parse_mode: "Markdown", disable_web_page_preview: true };
-  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
   const data = await res.json();
   if (!data.ok) throw new Error(`Telegram error: ${JSON.stringify(data)}`);
   return data;
 }
 
 const nowET = () => {
-  try { return new Date().toLocaleString("en-US", { timeZone: "America/New_York" }); }
-  catch { return new Date().toISOString(); }
+  try {
+    return new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
+  } catch {
+    return new Date().toISOString();
+  }
 };
 
 const guard = (fn) => async (req, res) => {
-  try { await fn(req, res); }
-  catch (e) { console.error("Route error:", e); res.status(500).json({ ok: false, error: String(e?.message || e) }); }
+  try {
+    await fn(req, res);
+  } catch (e) {
+    console.error("Route error:", e);
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
 };
 
 // ------------------------------ routes --------------------------------
@@ -108,31 +127,27 @@ app.get("/diag/provider", guard(async (_req, res) => {
   res.json({ ok, provider: "The Odds API", key_present: ok });
 }));
 
-app.get("/api/telegram/test", guard(async (req, res) => {
-  const text = req.query.text || "Hello from Odds Backend";
-  const force = req.query.force === "1";
-  if (!force && !BOOL(process.env.AUTO_TELEGRAM)) {
-    return res.json({ ok: true, skipped: true, reason: "AUTO_TELEGRAM=false; use ?force=1" });
-  }
-  const data = await sendTelegram(String(text));
-  res.json({ ok: true, status: 200, body: data });
-}));
-
+// Books per game (no extra credits beyond odds fetch)
 app.get("/api/diag/scan/:sport", guard(async (req, res) => {
   const sport = String(req.params.sport || "").toLowerCase();
   const limit = Number(req.query.limit || process.env.MAX_EVENTS_PER_CALL || 3);
   const events = await diagListBooksForSport(sport, { limit });
-  if (!events.length && !["nfl","mlb","ncaaf"].includes(sport)) {
+  if (!events.length && !["nfl", "mlb", "ncaaf"].includes(sport)) {
     return res.status(400).json({ ok: false, error: "unsupported_sport" });
   }
   res.json({
     ok: true,
-    sport, limit,
+    sport,
+    limit,
     pulled: events.length,
-    events: events.map(e => ({
-      gameId: e.id, away: e.away, home: e.home, commence_time: e.commence_time,
-      offers_count: e.books?.length || 0, books: e.books || []
-    }))
+    events: events.map((e) => ({
+      gameId: e.id,
+      away: e.away,
+      home: e.home,
+      commence_time: e.commence_time,
+      offers_count: e.books?.length || 0,
+      books: e.books || [],
+    })),
   });
 }));
 
@@ -141,7 +156,6 @@ app.get("/api/debug/snapshot/:sport", guard(async (req, res) => {
   const sport = String(req.params.sport || "").toLowerCase();
   const limit = Number(req.query.limit || 1);
 
-  // pick the same fetcher used by the scanner
   let fetcher = null;
   if (sport === "nfl") fetcher = getNFLH2HNormalized;
   else if (sport === "mlb") fetcher = getMLBH2HNormalized;
@@ -157,7 +171,7 @@ app.get("/api/debug/snapshot/:sport", guard(async (req, res) => {
     limit,
     has: Boolean(first),
     keys: first ? Object.keys(first) : [],
-    snapshot: first, // full object so we can inspect shape
+    snapshot: first,
   });
 }));
 
@@ -177,13 +191,16 @@ app.get("/api/debug/analyze/:sport", guard(async (req, res) => {
   const snaps = await fetcher({ limit });
   const snap = Array.isArray(snaps) && snaps.length ? snaps[0] : null;
 
-  // TEMP: allow overriding the snapshot's sport label for debugging
+  // TEMP overrides for debugging
   const forceSport = String(req.query.forceSport || "").toLowerCase();
   if (forceSport && snap) {
-    snap.sport = forceSport;   // <-- override happens HERE
+    snap.sport = forceSport;   // e.g., "nfl"
+  }
+  const forceMarket = String(req.query.forceMarket || "");
+  if (forceMarket && snap) {
+    snap.market = forceMarket; // e.g., "NFL H2H"
   }
 
-  // run analyzer
   const analysis = snap ? analyzeMarket(snap, { bypassDedupe: bypass }) : null;
 
   res.json({
@@ -197,31 +214,7 @@ app.get("/api/debug/analyze/:sport", guard(async (req, res) => {
   });
 }));
 
-  // pick fetcher
-  let fetcher = null;
-  if (sport === "nfl") fetcher = getNFLH2HNormalized;
-  else if (sport === "mlb") fetcher = getMLBH2HNormalized;
-  else if (sport === "ncaaf") fetcher = getNCAAFH2HNormalized;
-  else return res.status(400).json({ ok: false, error: "unsupported_sport" });
-
-  const snaps = await fetcher({ limit });
-  const snap = Array.isArray(snaps) && snaps.length ? snaps[0] : null;
-
-  // run analyzer (same call path as scans)
-  const analysis = snap ? analyzeMarket(snap, { bypassDedupe: bypass }) : null;
-
-  res.json({
-    ok: true,
-    sport,
-    limit,
-    has_snapshot: Boolean(snap),
-    snapshot_keys: snap ? Object.keys(snap) : [],
-    analysis_null: analysis === null,
-    analysis, // if non-null, you’ll see render/title/signals etc.
-  });
-}));
-
-
+// Mock scan (no credits)
 app.get("/api/scan/mock", guard(async (req, res) => {
   const telegram = req.query.telegram === "true";
   const force = req.query.force === "1";
@@ -233,16 +226,16 @@ app.get("/api/scan/mock", guard(async (req, res) => {
     sport: "nfl",
     market: "NFL H2H (mock)",
     game_id: `mock-${Date.now()}`,
-    game: { away: "Testers", home: "Mockers", start_time_utc: new Date(Date.now()+60_000).toISOString() },
+    game: { away: "Testers", home: "Mockers", start_time_utc: new Date(Date.now() + 60_000).toISOString() },
     sharp_side: { side: "home", team: "Mockers", confidence: "strong" },
     lines: { sharp_entry: -105, current_consensus: -105, direction: "flat", book: null },
     score: 3,
     signals: [
       { key: "split_gap", label: "Handle > Tickets by 20%", weight: 2 },
-      { key: "hold", label: "Hold 2%", weight: 1 }
+      { key: "hold", label: "Hold 2%", weight: 1 },
     ],
     render: { title: "SHARP ALERT – NFL Testers @ Mockers", emoji: "🔁", strength: "🟢 Strong", tags: ["SPLITS"] },
-    meta: { generated_at: new Date().toISOString(), bypass }
+    meta: { generated_at: new Date().toISOString(), bypass },
   };
 
   let sent = 0;
@@ -252,11 +245,18 @@ app.get("/api/scan/mock", guard(async (req, res) => {
   }
 
   res.json({
-    sport: "nfl", limit: 1, pulled: 1, analyzed: 1, sent_to_telegram: sent,
-    timestamp_et: nowET(), planned_jobs: ["NFL H2H (mock)"], alerts: [alert]
+    sport: "nfl",
+    limit: 1,
+    pulled: 1,
+    analyzed: 1,
+    sent_to_telegram: sent,
+    timestamp_et: nowET(),
+    planned_jobs: ["NFL H2H (mock)"],
+    alerts: [alert],
   });
 }));
 
+// Main scan
 app.get("/api/scan/:sport", guard(async (req, res) => {
   const sport = String(req.params.sport || "").toLowerCase();
   const limit = Number(req.query.limit || process.env.MAX_EVENTS_PER_CALL || 3);
@@ -279,13 +279,19 @@ app.get("/api/scan/:sport", guard(async (req, res) => {
 
   if (!jobs.length) {
     return res.json({
-      sport, limit, pulled: 0, analyzed: 0, sent_to_telegram: 0,
-      timestamp_et: nowET(), planned_jobs: plannedJobs, alerts: [],
-      note: "No jobs enabled via env for this sport."
+      sport,
+      limit,
+      pulled: 0,
+      analyzed: 0,
+      sent_to_telegram: 0,
+      timestamp_et: nowET(),
+      planned_jobs: plannedJobs,
+      alerts: [],
+      note: "No jobs enabled via env for this sport.",
     });
   }
 
-  // fetch
+  // fetch & slice
   const snapshots = [];
   for (const job of jobs) {
     const got = await job({ limit });
@@ -294,7 +300,7 @@ app.get("/api/scan/:sport", guard(async (req, res) => {
   const sliced = snapshots.slice(0, limit);
 
   // analyze
-  const analyzed = sliced.map(snap => analyzeMarket(snap, { bypassDedupe: bypass })).filter(Boolean);
+  const analyzed = sliced.map((snap) => analyzeMarket(snap, { bypassDedupe: bypass })).filter(Boolean);
 
   // telegram
   let sent = 0;
@@ -314,12 +320,14 @@ app.get("/api/scan/:sport", guard(async (req, res) => {
   }
 
   res.json({
-    sport, limit,
+    sport,
+    limit,
     pulled: sliced.length,
     analyzed: analyzed.length,
     sent_to_telegram: sent,
     timestamp_et: nowET(),
-    planned_jobs: plannedJobs, alerts: analyzed
+    planned_jobs: plannedJobs,
+    alerts: analyzed,
   });
 }));
 

@@ -23,7 +23,7 @@ const BOOKS_WHITELIST = (process.env.BOOKS_WHITELIST || "")
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
 
-// Helper: some users prefer alerting on just Pinnacle, but consensus from many
+// Helper: alert only on these, but form consensus from many
 const ALERT_BOOKS = (process.env.ALERT_BOOKS || "pinnacle")
   .split(",")
   .map((s) => s.trim().toLowerCase())
@@ -39,7 +39,7 @@ const ALERT_BOOKS = (process.env.ALERT_BOOKS || "pinnacle")
  */
 export async function fetchNFLH2H({ limit = 5 } = {}) {
   if (!ODDS_API_ENABLED) {
-    diag(() => console.log("diag[fetchNFLH2H] provider gate OFF → returning []"));
+    diag(() => console.log("diag[fetchNFLH2H] provider gate OFF → []"));
     return [];
   }
   if (!ODDS_API_KEY) {
@@ -67,7 +67,7 @@ export async function fetchNFLH2H({ limit = 5 } = {}) {
 
   const data = await safeJsonGet(url);
   if (!Array.isArray(data) || data.length === 0) {
-    diag(() => console.log("diag[fetchNFLH2H] empty provider payload"));
+    diag(() => console.log("diag[fetchNFLH2H] empty payload"));
     return [];
   }
 
@@ -77,7 +77,6 @@ export async function fetchNFLH2H({ limit = 5 } = {}) {
   for (const ev of data) {
     if (seen >= Math.max(1, MAX_EVENTS_PER_CALL)) break;
     const snap = mapOddsEventToNFLH2HSnapshot(ev);
-    // We’ll allow snap with 1 offer (for logging), but EV path needs ≥2 to analyze.
     if (snap) {
       snapshots.push(snap);
       seen++;
@@ -98,7 +97,7 @@ export async function fetchNFLH2H({ limit = 5 } = {}) {
     })
   );
 
-  // Light pacing between calls (even though this fetcher uses one call)
+  // Light pacing between calls
   await sleep(RATE_LIMIT_MS);
 
   return out;
@@ -156,8 +155,7 @@ export function mapOddsEventToNFLH2HSnapshot(ev) {
       home,
       away,
       commence_time,
-      // Your plan has no splits — leave tickets/handle undefined.
-      offers, // critical for EV analyzer (needs ≥ 2 to analyze)
+      offers, // critical for EV analyzer (needs ≥ 2)
     };
   } catch (e) {
     warn(`⚠️ mapOddsEventToNFLH2HSnapshot error: ${e?.message || e}`);
@@ -172,19 +170,15 @@ export function mapOddsEventToNFLH2HSnapshot(ev) {
 function norm(x) {
   return typeof x === "string" ? x.toLowerCase().trim() : "";
 }
-
 function toAmerican(n) {
-  // Odds API returns "price" as a number for american when oddsFormat=american.
   if (n == null) return null;
   const numVal = Number(n);
   return Number.isFinite(numVal) ? numVal : null;
 }
-
 function findOutcomeByTeam(outcomes, teamName) {
   const t = (teamName || "").toLowerCase();
   return outcomes.find((o) => (o.name || "").toLowerCase() === t);
 }
-
 function uniqBooks(offers = []) {
   return Array.from(
     new Set(
@@ -192,7 +186,6 @@ function uniqBooks(offers = []) {
     )
   );
 }
-
 function headersJson() {
   return {
     "Content-Type": "application/json",
@@ -212,10 +205,8 @@ async function safeJsonGet(url) {
       });
 
       if (res.status === 429) {
-        // Rate limited by provider — backoff then retry (if allowed)
         attempt++;
-        const wait =
-          RATE_LIMIT_MS * (attempt + 1); // simple linear step to stay conservative
+        const wait = RATE_LIMIT_MS * (attempt + 1);
         diag(() =>
           console.log(`diag[safeJsonGet] 429 from provider, backoff ${wait}ms (attempt ${attempt})`)
         );
@@ -231,7 +222,6 @@ async function safeJsonGet(url) {
       return await res.json();
     } catch (e) {
       lastErr = e;
-      // network hiccup or parse fail — do not retry aggressively
       break;
     }
   }
@@ -272,9 +262,9 @@ function num(k, def = 0) {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Default export (optional convenience)                                      */
+/*  Export shape expected by index.js                                          */
 /* -------------------------------------------------------------------------- */
-export default {
+export const FETCHERS = {
   fetchNFLH2H,
   mapOddsEventToNFLH2HSnapshot,
 };

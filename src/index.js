@@ -8,13 +8,13 @@ import { analyzeMarket } from "../sharpEngine.js";
 const PORT = process.env.PORT || 3000;
 
 const HARD_KILL = flag("HARD_KILL", false);
-const SCAN_ENABLED = flag("SCAN_ENABLED", false);        // cron/auto (we're using manual calls)
-const AUTO_TELEGRAM = flag("AUTO_TELEGRAM", false);
+const SCAN_ENABLED = flag("SCAN_ENABLED", false);        // cron/auto (unused here)
+const AUTO_TELEGRAM = flag("AUTO_TELEGRAM", false);      // default OFF; test & mock can force
 const DIAG = flag("DIAG", true);
 
 const MANUAL_MAX_JOBS = num("MANUAL_MAX_JOBS", 1);
 const MAX_JOBS_PER_SPORT = num("MAX_JOBS_PER_SPORT", 1);
-const MAX_EVENTS_PER_CALL = num("MAX_EVENTS_PER_CALL", 3);
+const MAX_EVENTS_PER_CALL = num("MAX_EVENTS_PER_CALL", 3); // fetchers honor this
 
 const ENABLE_NFL_H2H = flag("ENABLE_NFL_H2H", true);
 
@@ -50,7 +50,8 @@ if (HARD_KILL) {
   // GET /api/telegram/test?text=Hello&force=1
   app.get("/api/telegram/test", async (req, res) => {
     try {
-      const textRaw = (req.query.text ?? "🚨 TEST — Odds Backend Telegram wired 🔧 (safe mode)").toString();
+      const textRaw =
+        (req.query.text ?? "🚨 TEST — Odds Backend Telegram wired 🔧 (safe mode)").toString();
       const text = textRaw.slice(0, 3600); // Telegram limit safety
       const force = toBool(req.query.force, false);
 
@@ -58,26 +59,28 @@ if (HARD_KILL) {
         return res.status(400).json({
           ok: false,
           error: "auto_telegram_disabled",
-          note: "AUTO_TELEGRAM=false. Add &force=1 to override for this test."
+          note: "AUTO_TELEGRAM=false. Add &force=1 to override for this test.",
         });
       }
 
       const send = await sendTelegram(text);
       return res.status(send.ok ? 200 : 400).json(send);
     } catch (e) {
-      return res.status(500).json({ ok: false, error: "telegram_test_failed", message: e?.message || String(e) });
+      return res
+        .status(500)
+        .json({ ok: false, error: "telegram_test_failed", message: e?.message || String(e) });
     }
   });
 
   /* -------------------------- Mock scan → Telegram -------------------------- */
-  // NOTE: This must be *above* /api/scan/:sport so it doesn't get captured as :sport=mock
+  // IMPORTANT: this route is above /api/scan/:sport so it doesn't get captured as sport=mock
   // GET /api/scan/mock?telegram=true&force=1
   app.get("/api/scan/mock", async (req, res) => {
     try {
       const wantTelegram = toBool(req.query.telegram, false);
       const force = toBool(req.query.force, false);
 
-      // Synthetic snapshot that passes the SPLITS gates (no provider calls)
+      // Synthetic snapshot that guarantees an EV alert (no provider calls, zero credits)
       const snapshot = {
         sport: "nfl",
         market: "NFL H2H",
@@ -85,12 +88,20 @@ if (HARD_KILL) {
         home: "Mockers",
         away: "Testers",
         commence_time: new Date(Date.now() + 3 * 3600e3).toISOString(), // +3h
-        // SPLITS fields (so analyzer doesn't need offers[])
-        tickets: 40,     // ≤ maxTicketsPct (45)
-        handle: 60,      // ≥ minHandlePct (55)
-        hold: 0.04,      // ≤ hold.max (0.05 default)
+
+        // SPLITS fields (kept for completeness; EV path will fire regardless)
+        tickets: 40,
+        handle: 60,
+        hold: 0.02,
         side: "home",
-        line: -105
+        line: -105,
+
+        // EV path: 3-book market with a clear edge at Pinnacle (default ALERT_BOOKS)
+        offers: [
+          { book: "pinnacle",    prices: { home: { american: 120 }, away: { american: -130 } } },
+          { book: "draftkings",  prices: { home: { american: 105 }, away: { american: -115 } } },
+          { book: "betmgm",      prices: { home: { american: 105 }, away: { american: -115 } } },
+        ],
       };
 
       const alert = analyzeMarket(snapshot);
@@ -102,22 +113,27 @@ if (HARD_KILL) {
         if (result.ok) sent = 1;
       }
 
-      return res.status(200).json({
-        ok: true,
-        sport: "nfl",
-        pulled: 1,
-        analyzed: alert ? 1 : 0,
-        sent_to_telegram: sent,
-        alert: alert || null
-      });
+      return res.status(200).json(
+        summary({
+          sport: "nfl",
+          limit: 1,
+          pulled: 1,
+          analyzed: alert ? 1 : 0,
+          sent: sent,
+          planned_jobs: ["NFL H2H (mock)"],
+          alerts: alert ? [alert] : [],
+        })
+      );
     } catch (e) {
-      return res.status(500).json({ ok: false, error: "mock_scan_failed", message: e?.message || String(e) });
+      return res
+        .status(500)
+        .json({ ok: false, error: "mock_scan_failed", message: e?.message || String(e) });
     }
   });
 
   /* ------------------------------ Manual scan ------------------------------ */
-  // Supported: /api/scan/nfl?limit=5&telegram=false&dryrun=true
-  // With ODDS_API_ENABLED=false in fetchers, this route does NOT hit the provider.
+  // GET /api/scan/nfl?limit=5&telegram=false&dryrun=true
+  // With ODDS_API_ENABLED=false (in fetchers), this does NOT hit the provider.
   app.get("/api/scan/:sport", async (req, res) => {
     try {
       const sport = String(req.params.sport || "").toLowerCase();
@@ -129,7 +145,6 @@ if (HARD_KILL) {
         return res.status(400).json({ error: "unsupported_sport", sport });
       }
 
-      // plan jobs for this sport with current toggles
       const planned_jobs = [];
       if (sport === "nfl" && ENABLE_NFL_H2H) planned_jobs.push("NFL H2H");
 
@@ -138,11 +153,9 @@ if (HARD_KILL) {
       }
 
       if (dryrun) {
-        // Just show what we'd run — no provider calls
         return res.json(summary({ sport, limit, pulled: 0, analyzed: 0, sent: 0, planned_jobs }));
       }
 
-      // execute with strict safety clamps
       const jobsToRun = planned_jobs.slice(0, Math.min(MANUAL_MAX_JOBS, MAX_JOBS_PER_SPORT));
       let pulled = 0;
       let analyzed = 0;
@@ -159,8 +172,6 @@ if (HARD_KILL) {
             if (alert) {
               analyzed++;
               alerts.push(alert);
-
-              // Optional Telegram on a per-request basis:
               if (wantTelegram && AUTO_TELEGRAM) {
                 const txt = formatAlertForTelegram(alert);
                 const result = await sendTelegram(txt);
@@ -171,8 +182,9 @@ if (HARD_KILL) {
         }
       }
 
-      const body = summary({ sport, limit, pulled, analyzed, sent, planned_jobs, alerts });
-      return res.json(body);
+      return res.json(
+        summary({ sport, limit, pulled, analyzed, sent, planned_jobs, alerts })
+      );
     } catch (e) {
       console.error("scan_error:", e?.stack || e);
       return res.status(500).json({ error: "scan_failed", message: e?.message || String(e) });
@@ -191,7 +203,11 @@ async function sendTelegram(text) {
   const chatId = process.env.TELEGRAM_CHAT_ID || "";
 
   if (!token || !chatId) {
-    return { ok: false, error: "missing_telegram_env", need: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"] };
+    return {
+      ok: false,
+      error: "missing_telegram_env",
+      need: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"],
+    };
   }
 
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
@@ -219,17 +235,14 @@ function formatAlertForTelegram(a) {
   const title = a?.render?.title || "SHARP ALERT";
   const strength = a?.render?.strength || "";
   const side = a?.sharp_side?.team ? `Side: <b>${a.sharp_side.team}</b>` : "";
-  const price = a?.lines?.sharp_entry != null ? ` @ <b>${a.lines.sharp_entry}</b>` : "";
+  const price =
+    a?.lines?.sharp_entry != null ? ` @ <b>${a.lines.sharp_entry}</b>` : "";
   const src = a?.source ? `• Source: ${a.source.toUpperCase()}` : "";
-  const ev = a?.signals?.find(s => s.key === "ev_pct");
+  const ev = a?.signals?.find((s) => s.key === "ev_pct");
   const evLine = ev ? `• EV: ${ev.label}` : "";
-  return [
-    `🚨 <b>${title}</b>`,
-    `${strength}${price}`,
-    side,
-    src,
-    evLine,
-  ].filter(Boolean).join("\n");
+  return [`🚨 <b>${title}</b>`, `${strength}${price}`, side, src, evLine]
+    .filter(Boolean)
+    .join("\n");
 }
 
 /* --------------------------------- Helpers -------------------------------- */
@@ -260,11 +273,14 @@ function clampInt(v, def, min, max) {
 function summary({ sport, limit, pulled, analyzed, sent, planned_jobs, alerts = [] }) {
   const out = {
     sport,
-    limit,
-    pulled,
-    analyzed,
-    sent_to_telegram: sent,
-    timestamp_et: new Date().toLocaleString("en-US", { timeZone: "America/New_York", hour12: true }),
+    limit: limit ?? 0,
+    pulled: pulled ?? 0,
+    analyzed: analyzed ?? 0,
+    sent_to_telegram: sent ?? 0,
+    timestamp_et: new Date().toLocaleString("en-US", {
+      timeZone: "America/New_York",
+      hour12: true,
+    }),
     planned_jobs,
   };
   if (DIAG) out.alerts = alerts;

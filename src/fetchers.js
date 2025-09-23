@@ -68,32 +68,71 @@ function americanToDecimal(odds) {
 
 function normalizeH2H(rawGames, { sport, market } = {}) {
   if (!Array.isArray(rawGames)) return [];
-  return rawGames.map((g) => {
-    const home = g.home || g.home_team;
-    const away = g.away || g.away_team;
 
-    const offers = [];
+  return rawGames.map((g) => {
+    const homeName = g.home || g.home_team;
+    const awayName = g.away || g.away_team;
+
+    // Aggregate one offer per BOOK with both sides nested under prices.home/away
+    const offersByBook = new Map();
+
     for (const bm of g.bookmakers || []) {
+      const bookKey = String(bm.key || "").toLowerCase();
+      if (!bookKey) continue;
+
+      // Ensure entry exists
+      if (!offersByBook.has(bookKey)) {
+        offersByBook.set(bookKey, {
+          book: bookKey,
+          prices: {
+            home: { american: undefined },
+            away: { american: undefined },
+          },
+          last_update: bm.last_update,
+        });
+      }
+      const entry = offersByBook.get(bookKey);
+
       for (const mkt of bm.markets || []) {
         if (mkt.key !== "h2h") continue;
         for (const o of mkt.outcomes || []) {
-          offers.push({
-            book: bm.key,
-            team: o.name,
-            american: o.price,
-            decimal: americanToDecimal(o.price),
-            last_update: bm.last_update,
-          });
+          const team = String(o.name || "");
+          const price = Number(o.price);
+          if (!Number.isFinite(price)) continue;
+
+          // Map team → side using exact team names from the game
+          if (team === homeName) {
+            entry.prices.home.american = price;
+          } else if (team === awayName) {
+            entry.prices.away.american = price;
+          }
         }
       }
     }
 
+    // Flatten, keep only books that have at least one side priced
+    const offers = Array.from(offersByBook.values()).filter(o =>
+      Number.isFinite(Number(o.prices.home.american)) ||
+      Number.isFinite(Number(o.prices.away.american))
+    );
+
     return {
+      // analyzer expects these top-level fields:
       id: g.id,
+      gameId: g.id,
       sport,
-      market, // <-- important for analyzer routing
-      game: { away, home, start_time_utc: g.commence_time },
+      market,
+      home: homeName,
+      away: awayName,
+      commence_time: g.commence_time,
+
+      // keep the old game block for debugging/compat
+      game: { away: awayName, home: homeName, start_time_utc: g.commence_time },
+
+      // analyzer-consumable offers
       offers,
+
+      // provenance
       source_meta: { sport_key: g.sport_key, fetched_at: new Date().toISOString() },
     };
   });

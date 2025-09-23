@@ -80,7 +80,6 @@ function normalizeH2H(rawGames, { sport, market } = {}) {
       const bookKey = String(bm.key || "").toLowerCase();
       if (!bookKey) continue;
 
-      // Ensure entry exists
       if (!offersByBook.has(bookKey)) {
         offersByBook.set(bookKey, {
           book: bookKey,
@@ -100,17 +99,12 @@ function normalizeH2H(rawGames, { sport, market } = {}) {
           const price = Number(o.price);
           if (!Number.isFinite(price)) continue;
 
-          // Map team → side using exact team names from the game
-          if (team === homeName) {
-            entry.prices.home.american = price;
-          } else if (team === awayName) {
-            entry.prices.away.american = price;
-          }
+          if (team === homeName) entry.prices.home.american = price;
+          else if (team === awayName) entry.prices.away.american = price;
         }
       }
     }
 
-    // Flatten, keep only books that have at least one side priced
     const offers = Array.from(offersByBook.values()).filter(o =>
       Number.isFinite(Number(o.prices.home.american)) ||
       Number.isFinite(Number(o.prices.away.american))
@@ -126,7 +120,7 @@ function normalizeH2H(rawGames, { sport, market } = {}) {
       away: awayName,
       commence_time: g.commence_time,
 
-      // keep the old game block for debugging/compat
+      // keep for debug/compat
       game: { away: awayName, home: homeName, start_time_utc: g.commence_time },
 
       // analyzer-consumable offers
@@ -138,21 +132,24 @@ function normalizeH2H(rawGames, { sport, market } = {}) {
   });
 }
 
-// -------------------- Sport/market fetchers --------------------
+// -------------------- Sport/market fetchers (now support offset) --------------------
 
-export async function getNFLH2HNormalized({ limit = 3 } = {}) {
+export async function getNFLH2HNormalized({ limit = 3, offset = 0 } = {}) {
   const raw = await fetchOdds("americanfootball_nfl", "h2h");
-  return normalizeH2H(raw, { sport: "nfl", market: "NFL H2H" }).slice(0, limit);
+  return normalizeH2H(raw, { sport: "nfl", market: "NFL H2H" })
+    .slice(offset, offset + limit);
 }
 
-export async function getMLBH2HNormalized({ limit = 3 } = {}) {
+export async function getMLBH2HNormalized({ limit = 3, offset = 0 } = {}) {
   const raw = await fetchOdds("baseball_mlb", "h2h");
-  return normalizeH2H(raw, { sport: "mlb", market: "MLB H2H" }).slice(0, limit);
+  return normalizeH2H(raw, { sport: "mlb", market: "MLB H2H" })
+    .slice(offset, offset + limit);
 }
 
-export async function getNCAAFH2HNormalized({ limit = 3 } = {}) {
+export async function getNCAAFH2HNormalized({ limit = 3, offset = 0 } = {}) {
   const raw = await fetchOdds("americanfootball_ncaaf", "h2h");
-  return normalizeH2H(raw, { sport: "ncaaf", market: "NCAAF H2H" }).slice(0, limit);
+  return normalizeH2H(raw, { sport: "ncaaf", market: "NCAAF H2H" })
+    .slice(offset, offset + limit);
 }
 
 // -------------------- Diagnostics --------------------

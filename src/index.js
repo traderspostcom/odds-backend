@@ -2,7 +2,7 @@
 import express from "express";
 import cors from "cors";
 import { FETCHERS } from "./fetchers.js";
-import { analyzeMarket } from "./sharpEngine.js";
+import { analyzeMarket } from "../sharpEngine.js";
 
 /* ------------------------------ ENV / SAFETY ------------------------------ */
 const PORT = process.env.PORT || 3000;

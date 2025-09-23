@@ -136,6 +136,32 @@ app.get("/api/diag/scan/:sport", guard(async (req, res) => {
   });
 }));
 
+// ---------- DEBUG: return one normalized snapshot (no Telegram) ----------
+app.get("/api/debug/snapshot/:sport", guard(async (req, res) => {
+  const sport = String(req.params.sport || "").toLowerCase();
+  const limit = Number(req.query.limit || 1);
+
+  // pick the same fetcher used by the scanner
+  let fetcher = null;
+  if (sport === "nfl") fetcher = getNFLH2HNormalized;
+  else if (sport === "mlb") fetcher = getMLBH2HNormalized;
+  else if (sport === "ncaaf") fetcher = getNCAAFH2HNormalized;
+  else return res.status(400).json({ ok: false, error: "unsupported_sport" });
+
+  const snaps = await fetcher({ limit });
+  const first = Array.isArray(snaps) && snaps.length ? snaps[0] : null;
+
+  res.json({
+    ok: true,
+    sport,
+    limit,
+    has: Boolean(first),
+    keys: first ? Object.keys(first) : [],
+    snapshot: first, // full object so we can inspect shape
+  });
+}));
+
+
 app.get("/api/scan/mock", guard(async (req, res) => {
   const telegram = req.query.telegram === "true";
   const force = req.query.force === "1";

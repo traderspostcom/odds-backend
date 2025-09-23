@@ -8,8 +8,8 @@ import { analyzeMarket } from "../sharpEngine.js";
 const PORT = process.env.PORT || 3000;
 
 const HARD_KILL = flag("HARD_KILL", false);
-const SCAN_ENABLED = flag("SCAN_ENABLED", false);        // cron/auto (we're using manual scans)
-const AUTO_TELEGRAM = flag("AUTO_TELEGRAM", false);
+const SCAN_ENABLED = flag("SCAN_ENABLED", false);        // cron/auto (we're using manual calls)
+const AUTO_TELEGRAM = flag("AUTO_TELEGRAM", false);      // default OFF; test route can force send
 const DIAG = flag("DIAG", true);
 
 const MANUAL_MAX_JOBS = num("MANUAL_MAX_JOBS", 1);
@@ -46,8 +46,35 @@ if (HARD_KILL) {
     });
   });
 
+  /* ---------------------- Zero-credit Telegram test ping -------------------- */
+  // Usage:
+  //   GET /api/telegram/test?text=Hello&force=1
+  // Sends a message directly to Telegram WITHOUT touching Odds API.
+  app.get("/api/telegram/test", async (req, res) => {
+    try {
+      const textRaw = (req.query.text ?? "🚨 TEST — Odds Backend Telegram wired 🔧 (safe mode)").toString();
+      const text = textRaw.slice(0, 3600); // Telegram limit safety
+      const force = toBool(req.query.force, false);
+
+      if (!AUTO_TELEGRAM && !force) {
+        return res.status(400).json({
+          ok: false,
+          error: "auto_telegram_disabled",
+          note: "AUTO_TELEGRAM=false. Add &force=1 to override for this test."
+        });
+      }
+
+      const send = await sendTelegram(text);
+      return res.status(send.ok ? 200 : 400).json(send);
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: "telegram_test_failed", message: e?.message || String(e) });
+    }
+  });
+
   /* ------------------------------ Manual scan ------------------------------ */
   // Supported: /api/scan/nfl?limit=5&telegram=false&dryrun=true
+  // NOTE: This route still honors all your safety gates. With ODDS_API_ENABLED=false
+  // in fetchers, calling it will NOT hit the provider.
   app.get("/api/scan/:sport", async (req, res) => {
     try {
       const sport = String(req.params.sport || "").toLowerCase();
@@ -55,29 +82,23 @@ if (HARD_KILL) {
       const wantTelegram = toBool(req.query.telegram, false);
       const dryrun = toBool(req.query.dryrun, false);
 
-      // currently we only support nfl (expand later)
       if (sport !== "nfl") {
         return res.status(400).json({ error: "unsupported_sport", sport });
       }
 
-      // plan jobs for this sport with current toggles
       const planned_jobs = [];
       if (sport === "nfl" && ENABLE_NFL_H2H) planned_jobs.push("NFL H2H");
 
       if (planned_jobs.length === 0) {
-        return res.json(summary({
-          sport, limit, pulled: 0, analyzed: 0, sent: 0, planned_jobs
-        }));
+        return res.json(summary({ sport, limit, pulled: 0, analyzed: 0, sent: 0, planned_jobs }));
       }
 
       if (dryrun) {
-        // Just show what we'd run — no provider calls
-        return res.json(summary({
-          sport, limit, pulled: 0, analyzed: 0, sent: 0, planned_jobs
-        }));
+        // No provider calls; just show plan
+        return res.json(summary({ sport, limit, pulled: 0, analyzed: 0, sent: 0, planned_jobs }));
       }
 
-      // execute with strict safety clamps
+      // Execute with strict clamps
       const jobsToRun = planned_jobs.slice(0, Math.min(MANUAL_MAX_JOBS, MAX_JOBS_PER_SPORT));
       let pulled = 0;
       let analyzed = 0;
@@ -94,14 +115,16 @@ if (HARD_KILL) {
             if (alert) {
               analyzed++;
               alerts.push(alert);
+
+              // Optional Telegram on a per-request basis:
+              if (wantTelegram && AUTO_TELEGRAM) {
+                const txt = formatAlertForTelegram(alert);
+                const result = await sendTelegram(txt);
+                if (result.ok) sent++;
+              }
             }
           }
         }
-      }
-
-      // No auto sends in safety mode – just report
-      if (wantTelegram && AUTO_TELEGRAM) {
-        // (intentionally no-op right now; you disabled AUTO_TELEGRAM)
       }
 
       const body = summary({ sport, limit, pulled, analyzed, sent, planned_jobs, alerts });
@@ -117,6 +140,53 @@ if (HARD_KILL) {
 app.listen(PORT, () => {
   console.log(`odds-backend listening on :${PORT}`);
 });
+
+/* ------------------------------ Telegram util ----------------------------- */
+async function sendTelegram(text) {
+  const token = process.env.TELEGRAM_BOT_TOKEN || "";
+  const chatId = process.env.TELEGRAM_CHAT_ID || "";
+
+  if (!token || !chatId) {
+    return { ok: false, error: "missing_telegram_env", need: ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"] };
+  }
+
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
+  const payload = {
+    chat_id: chatId,
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+  };
+
+  try {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const j = await r.json().catch(() => ({}));
+    return { ok: j?.ok === true, status: r.status, body: j };
+  } catch (e) {
+    return { ok: false, error: "telegram_request_failed", message: e?.message || String(e) };
+  }
+}
+
+function formatAlertForTelegram(a) {
+  const title = a?.render?.title || "SHARP ALERT";
+  const strength = a?.render?.strength || "";
+  const side = a?.sharp_side?.team ? `Side: <b>${a.sharp_side.team}</b>` : "";
+  const price = a?.lines?.sharp_entry != null ? ` @ <b>${a.lines.sharp_entry}</b>` : "";
+  const src = a?.source ? `• Source: ${a.source.toUpperCase()}` : "";
+  const ev = a?.signals?.find(s => s.key === "ev_pct");
+  const evLine = ev ? `• EV: ${ev.label}` : "";
+  return [
+    `🚨 <b>${title}</b>`,
+    `${strength} ${price}`,
+    side,
+    src,
+    evLine,
+  ].filter(Boolean).join("\n");
+}
 
 /* --------------------------------- Helpers -------------------------------- */
 function flag(k, def = false) {
@@ -153,7 +223,6 @@ function summary({ sport, limit, pulled, analyzed, sent, planned_jobs, alerts = 
     timestamp_et: new Date().toLocaleString("en-US", { timeZone: "America/New_York", hour12: true }),
     planned_jobs,
   };
-  // Include alerts only when DIAG enabled to keep payload small
   if (DIAG) out.alerts = alerts;
   return out;
 }

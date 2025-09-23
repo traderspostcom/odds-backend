@@ -17,7 +17,7 @@ async function fetchOdds(sportKey, market, extra = {}) {
   const params = new URLSearchParams({
     apiKey,
     regions: getRegion(),
-    markets: market,
+    markets: market,          // e.g., "h2h"
     oddsFormat: "american",
     dateFormat: "iso",
   });
@@ -66,7 +66,7 @@ function americanToDecimal(odds) {
   return 1;
 }
 
-function normalizeH2H(rawGames, { sport } = {}) {
+function normalizeH2H(rawGames, { sport, market } = {}) {
   if (!Array.isArray(rawGames)) return [];
   return rawGames.map((g) => {
     const home = g.home || g.home_team;
@@ -91,6 +91,7 @@ function normalizeH2H(rawGames, { sport } = {}) {
     return {
       id: g.id,
       sport,
+      market, // <-- important for analyzer routing
       game: { away, home, start_time_utc: g.commence_time },
       offers,
       source_meta: { sport_key: g.sport_key, fetched_at: new Date().toISOString() },
@@ -100,22 +101,19 @@ function normalizeH2H(rawGames, { sport } = {}) {
 
 // -------------------- Sport/market fetchers --------------------
 
-// NFL full game moneyline
 export async function getNFLH2HNormalized({ limit = 3 } = {}) {
   const raw = await fetchOdds("americanfootball_nfl", "h2h");
-  return normalizeH2H(raw, { sport: "nfl" }).slice(0, limit);
+  return normalizeH2H(raw, { sport: "nfl", market: "NFL H2H" }).slice(0, limit);
 }
 
-// MLB full game moneyline
 export async function getMLBH2HNormalized({ limit = 3 } = {}) {
   const raw = await fetchOdds("baseball_mlb", "h2h");
-  return normalizeH2H(raw, { sport: "mlb" }).slice(0, limit);
+  return normalizeH2H(raw, { sport: "mlb", market: "MLB H2H" }).slice(0, limit);
 }
 
-// NCAAF full game moneyline
 export async function getNCAAFH2HNormalized({ limit = 3 } = {}) {
   const raw = await fetchOdds("americanfootball_ncaaf", "h2h");
-  return normalizeH2H(raw, { sport: "ncaaf" }).slice(0, limit);
+  return normalizeH2H(raw, { sport: "ncaaf", market: "NCAAF H2H" }).slice(0, limit);
 }
 
 // -------------------- Diagnostics --------------------

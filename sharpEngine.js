@@ -1,43 +1,36 @@
 // sharpEngine.js (root)
-// Hybrid analyzer: use splits if present; otherwise EV fallback (multi-book).
-// Driven by env vars only; no config import.
+// Hybrid analyzer: use SPLITS if available, else EV fallback from multi-book offers.
+// Env-driven (no config import). Supports ALERT_BOOKS="*" and per-book consensus exclusion.
+// Exports: analyzeMarket(snapshot)
 
 import fs from "fs";
 
-/* ------------------------------- ENV / KNOBS ------------------------------- */
+/* ============================== ENV / KNOBS =============================== */
+// Logging
 const DIAG = envBool("DIAG", true);
 
 // EV thresholds (fractions: 0.01 = 1%)
-const LEAN_THRESHOLD = envNum("LEAN_THRESHOLD", 0.005);   // 0.5% default
+const LEAN_THRESHOLD   = envNum("LEAN_THRESHOLD", 0.005);  // 0.5% default
 const STRONG_THRESHOLD = envNum("STRONG_THRESHOLD", 0.010); // 1.0% default
 
-// Which books to alert on. Supports "*" for "any".
+// Books to alert on. Supports "*" meaning "any".
 const RAW_ALERT_BOOKS = (process.env.ALERT_BOOKS || "pinnacle")
-  .split(",")
-  .map((s) => s.trim().toLowerCase())
-  .filter(Boolean);
-const ALERT_ALL = RAW_ALERT_BOOKS.includes("*");
-const ALERT_BOOKS = RAW_ALERT_BOOKS.filter((b) => b !== "*");
+  .split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+const ALERT_ALL   = RAW_ALERT_BOOKS.includes("*");
+const ALERT_BOOKS = RAW_ALERT_BOOKS.filter(b => b !== "*");
 
-// Re-alert / dedupe state
+// Simple re-alert / dedupe state (per gameId)
 const STATE_FILE = process.env.SHARP_STATE_FILE || "./sharp_state.json";
 let STATE = {};
 try {
-  if (fs.existsSync(STATE_FILE)) {
-    STATE = JSON.parse(fs.readFileSync(STATE_FILE, "utf8") || "{}");
-  }
-} catch {
-  STATE = {};
-}
+  if (fs.existsSync(STATE_FILE)) STATE = JSON.parse(fs.readFileSync(STATE_FILE, "utf8") || "{}");
+} catch { STATE = {}; }
 function saveState() {
-  try {
-    fs.writeFileSync(STATE_FILE, JSON.stringify(STATE, null, 2));
-  } catch (e) {
-    console.warn("⚠️ Could not persist sharp state:", e?.message || e);
-  }
+  try { fs.writeFileSync(STATE_FILE, JSON.stringify(STATE, null, 2)); }
+  catch (e) { console.warn("⚠️ Could not persist sharp state:", e?.message || e); }
 }
 
-/* --------------------------------- EXPORT --------------------------------- */
+/* ================================ EXPORT ================================== */
 export function analyzeMarket(snapshot) {
   if (!snapshot || typeof snapshot !== "object") return null;
 
@@ -48,13 +41,13 @@ export function analyzeMarket(snapshot) {
   const away = snapshot.away;
   const commence_time = snapshot.commence_time || null;
 
-  // 1) Splits path if tickets/handle are present
+  // 1) Splits path (tickets/handle present)
   if (hasSplits(snapshot)) {
-    const alert = analyzeWithSplits(snapshot, { sport, market, gameId, home, away, commence_time });
-    if (alert) return alert;
+    const a = analyzeWithSplits(snapshot, { sport, market, gameId, home, away, commence_time });
+    if (a) return a;
   }
 
-  // 2) EV fallback (needs >= 2 books)
+  // 2) EV fallback path (needs ≥2 distinct books)
   const offers = normalizeOffers(snapshot);
   if (offers.length < 2) {
     diag(() => console.log(`diag[EV] ${away} @ ${home} | offers=${offers.length} (need ≥2)`));
@@ -64,26 +57,26 @@ export function analyzeMarket(snapshot) {
   return analyzeWithEV(offers, { sport, market, gameId, home, away, commence_time });
 }
 
-/* ------------------------------- SPLITS PATH ------------------------------- */
+/* =============================== SPLITS PATH ============================== */
 function analyzeWithSplits(s, meta) {
-  // Normalize
   const tickets = num(s.tickets);
-  const handle = num(s.handle);
-  const hold = num(s.hold, null);
+  const handle  = num(s.handle);
+  const hold    = num(s.hold, null);
   if (!isFiniteNum(tickets) || !isFiniteNum(handle)) return null;
 
+  // Normalize to 0..100
   const tPct = tickets > 1 ? tickets : tickets * 100;
-  const hPct = handle > 1 ? handle : handle * 100;
+  const hPct = handle  > 1 ? handle  : handle  * 100;
   const gapPct = hPct - tPct;
 
-  // Rules
+  // Simple rules
   const rules = { maxTicketsPct: 45, minHandlePct: 55, minGap: 10, maxHold: 7, prefHold: 5 };
   if (tPct > rules.maxTicketsPct) return null;
-  if (hPct < rules.minHandlePct) return null;
-  if (gapPct < rules.minGap) return null;
+  if (hPct < rules.minHandlePct)  return null;
+  if (gapPct < rules.minGap)      return null;
   if (hold != null && hold > rules.maxHold / 100) return null;
 
-  // Score
+  // Score → tier
   let score = 0;
   if (gapPct >= rules.minGap) score += 2;
   if (hold == null || hold <= rules.prefHold / 100) score += 1;
@@ -91,9 +84,10 @@ function analyzeWithSplits(s, meta) {
   const tier = score >= 3 ? "strong" : score >= 2 ? "lean" : "pass";
   if (tier === "pass") return null;
 
-  const line = s.line ?? null;
+  // Build alert
   const side = s.side || (hPct >= tPct ? "home" : "away");
   const team = side === "home" ? meta.home : meta.away;
+  const line = s.line ?? null;
 
   return finalizeAlert({
     ...meta,
@@ -112,41 +106,51 @@ function analyzeWithSplits(s, meta) {
   });
 }
 
-/* -------------------------------- EV PATH --------------------------------- */
+/* ================================ EV PATH =================================
+   Key improvement: when evaluating a book’s price, we build consensus FAIR
+   from *other* books (exclude the candidate) to avoid diluting edges.       */
 function analyzeWithEV(offers, meta) {
-  // Separate target vs consensus
+  // Partition target vs non-target books.
   const all = offers;
-  const target = ALERT_ALL ? all : all.filter((o) => ALERT_BOOKS.includes(o.book));
-  const consensusPool = ALERT_ALL ? all : all.filter((o) => !ALERT_BOOKS.includes(o.book));
+  const targetSet   = ALERT_ALL ? all : all.filter(o => ALERT_BOOKS.includes(o.book));
+  const nonTargetSet = ALERT_ALL ? all : all.filter(o => !ALERT_BOOKS.includes(o.book));
 
-  if (target.length === 0) {
-    diag(() => console.log(`diag[EV] ${meta.away} @ ${meta.home} | no target offers under ALERT_BOOKS=[${ALERT_BOOKS.join(",")}]`));
+  // If ALERT_ALL, we’ll still exclude each candidate from consensus below.
+  if (targetSet.length === 0) {
+    diag(() => console.log(`diag[EV] ${meta.away} @ ${meta.home} | no target offers (ALERT_BOOKS=[${ALERT_BOOKS.join(",")}])`));
     return null;
   }
-  const consensus = consensusPool.length ? consensusPool : all; // allow ALERT_ALL case
 
-  // Build fair (per-book devig → average)
-  const fair = buildFairFrom(consensus);
-  if (!fair) return null;
-
-  // Evaluate EV for each side at each target book
   let best = null;
-  for (const o of target) {
+
+  for (const o of targetSet) {
+    // Build consensus excluding this candidate book (preferred).
+    let consensusPool = all.filter(x => x.book !== o.book);
+    if (!consensusPool.length) {
+      // Fallback to non-target pool (if we’re not ALERT_ALL).
+      consensusPool = nonTargetSet.length ? nonTargetSet : all;
+    }
+
+    const fair = buildFairFrom(consensusPool);
+    if (!fair) continue;
+
+    // Evaluate both sides at this book.
     if (isFiniteNum(o.home)) {
       const evH = evFromFair(o.home, fair.pHome);
-      if (!best || evH > best.evPct) best = { side: "home", price: o.home, book: o.book, evPct: evH };
+      if (!best || evH > best.evPct) best = { side: "home", price: o.home, book: o.book, evPct: evH, fairN: fair.n, fairPH: fair.pHome };
     }
     if (isFiniteNum(o.away)) {
       const evA = evFromFair(o.away, 1 - fair.pHome);
-      if (!best || evA > best.evPct) best = { side: "away", price: o.away, book: o.book, evPct: evA };
+      if (!best || evA > best.evPct) best = { side: "away", price: o.away, book: o.book, evPct: evA, fairN: fair.n, fairPH: fair.pHome };
     }
   }
+
   if (!best) return null;
 
   const ev = best.evPct;
   const tier = ev >= STRONG_THRESHOLD ? "strong" : ev >= LEAN_THRESHOLD ? "lean" : "pass";
   if (tier === "pass") {
-    diag(() => console.log(`diag[EV] ${meta.away} @ ${meta.home} | best EV ${(ev * 100).toFixed(2)}% below threshold`));
+    diag(() => console.log(`diag[EV] ${meta.away} @ ${meta.home} | best EV ${(ev * 100).toFixed(2)}% below gates`));
     return null;
   }
 
@@ -155,7 +159,7 @@ function analyzeWithEV(offers, meta) {
   return finalizeAlert({
     ...meta,
     source: "ev",
-    score: Math.round(ev * 10000) / 100, // EV% to 2dp
+    score: Math.round(ev * 10000) / 100, // EV% with 2 dp
     tier,
     side: best.side,
     team,
@@ -163,29 +167,28 @@ function analyzeWithEV(offers, meta) {
     priceBook: best.book,
     evPct: ev,
     signals: [
-      { key: "consensus_n", label: `Consensus N=${fair.n}`, weight: 1 },
-      { key: "fair_home", label: `Fair(Home) ${(fair.pHome * 100).toFixed(1)}%`, weight: 1 },
-      { key: "ev_pct", label: `+${(ev * 100).toFixed(2)}% EV`, weight: 2 },
-      { key: "book", label: `Book ${best.book}`, weight: 1 },
+      { key: "consensus_n", label: `Consensus N=${best.fairN}`,     weight: 1 },
+      { key: "fair_home",   label: `Fair(Home) ${(best.fairPH*100).toFixed(1)}%`, weight: 1 },
+      { key: "ev_pct",      label: `+${(ev*100).toFixed(2)}% EV`,   weight: 2 },
+      { key: "book",        label: `Book ${best.book}`,             weight: 1 },
     ],
   });
 }
 
-/* ----------------------------- EV / FAIR MATH ------------------------------ */
+/* ============================= FAIR/EV HELPERS ============================ */
 function buildFairFrom(consensusOffers) {
   const rows = [];
   for (const o of consensusOffers) {
     if (!isFiniteNum(o.home) || !isFiniteNum(o.away)) continue;
     const pH_raw = impliedFromAmerican(o.home);
     const pA_raw = impliedFromAmerican(o.away);
-    const sum = pH_raw + pA_raw;
-    if (sum <= 0) continue;
-    const pH = pH_raw / sum; // devig within book
+    const s = pH_raw + pA_raw;
+    if (s <= 0) continue;
+    const pH = pH_raw / s; // devig within book
     rows.push(pH);
   }
-  if (rows.length === 0) return null;
-  const pHome = avg(rows);
-  return { pHome, n: rows.length };
+  if (!rows.length) return null;
+  return { pHome: avg(rows), n: rows.length };
 }
 
 function evFromFair(american, fairP) {
@@ -194,7 +197,7 @@ function evFromFair(american, fairP) {
   return fairP * (dec - 1) - (1 - fairP);
 }
 
-/* --------------------------------- HELPERS -------------------------------- */
+/* ================================ UTILITIES ================================ */
 function normalizeOffers(snap) {
   const out = [];
   const seen = new Set();
@@ -209,7 +212,6 @@ function normalizeOffers(snap) {
   }
   return out;
 }
-
 function hasSplits(s) {
   return typeof s?.tickets === "number" && typeof s?.handle === "number";
 }
@@ -225,11 +227,12 @@ function impliedFromAmerican(a) {
   return n > 0 ? 100 / (n + 100) : Math.abs(n) / (Math.abs(n) + 100);
 }
 
+/* --------------------------- Alert Construction --------------------------- */
 function finalizeAlert({
   sport, market, gameId, home, away, commence_time,
   source, score, tier, side, team, entryLine, priceBook, evPct, signals,
 }) {
-  // simple dedupe/cooldown (30m)
+  // Dedupe / cooldown (30m). Only re-alert if price improved.
   const key = gameId || `${home}-${away}-${market}`;
   const now = Date.now();
   const prev = STATE[key];
@@ -239,7 +242,6 @@ function finalizeAlert({
   if (prev) {
     const cooldownMs = 30 * 60 * 1000;
     if (now - prev.ts < cooldownMs) {
-      // only re-alert if price improved
       if (isFiniteNum(entryLine) && isFiniteNum(prev.entryLine)) {
         if (americanBetter(entryLine, prev.entryLine)) {
           type = "realert_plus";
@@ -284,13 +286,12 @@ function finalizeAlert({
   };
 }
 
+/* --------------------------------- Helpers -------------------------------- */
 function americanBetter(curr, prev) {
   if (!isFiniteNum(curr) || !isFiniteNum(prev)) return false;
-  // Dogs: higher is better; Favs: closer to zero is better
-  if (prev >= 0) return curr > prev;
-  return curr > prev; // -110 > -120
+  // Dogs: higher is better; Favs: closer to zero (less negative) is better.
+  return curr > prev;
 }
-
 function avg(arr) { let s = 0; for (const x of arr) s += x; return arr.length ? s / arr.length : NaN; }
 function isFiniteNum(x) { return Number.isFinite(Number(x)); }
 function num(x, def = undefined) { const n = Number(x); return Number.isFinite(n) ? n : def; }

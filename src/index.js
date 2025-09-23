@@ -50,10 +50,8 @@ function envSnapshot() {
     // markets we care about
     ENABLE_NFL_H2H: BOOL(ENABLE_NFL_H2H),
     ENABLE_NFL_H1: BOOL(ENABLE_NFL_H1),
-
     ENABLE_MLB_H2H: BOOL(ENABLE_MLB_H2H),
     ENABLE_MLB_F5_H2H: BOOL(ENABLE_MLB_F5_H2H),
-
     ENABLE_NCAAF_H2H: BOOL(ENABLE_NCAAF_H2H),
     ENABLE_NCAAF_SPREADS: BOOL(ENABLE_NCAAF_SPREADS),
     ENABLE_NCAAF_TOTALS: BOOL(ENABLE_NCAAF_TOTALS),
@@ -89,31 +87,20 @@ async function sendTelegram(text) {
 
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
   const body = { chat_id: chatId, text, parse_mode: "Markdown", disable_web_page_preview: true };
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const data = await res.json();
   if (!data.ok) throw new Error(`Telegram error: ${JSON.stringify(data)}`);
   return data;
 }
 
 const nowET = () => {
-  try {
-    return new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
-  } catch {
-    return new Date().toISOString();
-  }
+  try { return new Date().toLocaleString("en-US", { timeZone: "America/New_York" }); }
+  catch { return new Date().toISOString(); }
 };
 
 const guard = (fn) => async (req, res) => {
-  try {
-    await fn(req, res);
-  } catch (e) {
-    console.error("Route error:", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
+  try { await fn(req, res); }
+  catch (e) { console.error("Route error:", e); res.status(500).json({ ok: false, error: String(e?.message || e) }); }
 };
 
 // ------------------------------ routes --------------------------------
@@ -137,17 +124,12 @@ app.get("/api/diag/scan/:sport", guard(async (req, res) => {
   }
   res.json({
     ok: true,
-    sport,
-    limit,
+    sport, limit,
     pulled: events.length,
-    events: events.map((e) => ({
-      gameId: e.id,
-      away: e.away,
-      home: e.home,
-      commence_time: e.commence_time,
-      offers_count: e.books?.length || 0,
-      books: e.books || [],
-    })),
+    events: events.map(e => ({
+      gameId: e.id, away: e.away, home: e.home, commence_time: e.commence_time,
+      offers_count: e.books?.length || 0, books: e.books || []
+    }))
   });
 }));
 
@@ -155,6 +137,7 @@ app.get("/api/diag/scan/:sport", guard(async (req, res) => {
 app.get("/api/debug/snapshot/:sport", guard(async (req, res) => {
   const sport = String(req.params.sport || "").toLowerCase();
   const limit = Number(req.query.limit || 1);
+  const offset = Number(req.query.offset || 0);
 
   let fetcher = null;
   if (sport === "nfl") fetcher = getNFLH2HNormalized;
@@ -162,23 +145,17 @@ app.get("/api/debug/snapshot/:sport", guard(async (req, res) => {
   else if (sport === "ncaaf") fetcher = getNCAAFH2HNormalized;
   else return res.status(400).json({ ok: false, error: "unsupported_sport" });
 
-  const snaps = await fetcher({ limit });
+  const snaps = await fetcher({ limit, offset });
   const first = Array.isArray(snaps) && snaps.length ? snaps[0] : null;
 
-  res.json({
-    ok: true,
-    sport,
-    limit,
-    has: Boolean(first),
-    keys: first ? Object.keys(first) : [],
-    snapshot: first,
-  });
+  res.json({ ok: true, sport, limit, offset, has: Boolean(first), keys: first ? Object.keys(first) : [], snapshot: first });
 }));
 
 // ---------- DEBUG: run analyzer on one normalized snapshot ----------
 app.get("/api/debug/analyze/:sport", guard(async (req, res) => {
   const sport = String(req.params.sport || "").toLowerCase();
   const limit = Number(req.query.limit || 1);
+  const offset = Number(req.query.offset || 0);
   const bypass = req.query.bypass === "1";
 
   // pick fetcher
@@ -188,25 +165,19 @@ app.get("/api/debug/analyze/:sport", guard(async (req, res) => {
   else if (sport === "ncaaf") fetcher = getNCAAFH2HNormalized;
   else return res.status(400).json({ ok: false, error: "unsupported_sport" });
 
-  const snaps = await fetcher({ limit });
+  const snaps = await fetcher({ limit, offset });
   const snap = Array.isArray(snaps) && snaps.length ? snaps[0] : null;
 
-  // TEMP overrides for debugging
+  // TEMP debug overrides
   const forceSport = String(req.query.forceSport || "").toLowerCase();
-  if (forceSport && snap) {
-    snap.sport = forceSport;   // e.g., "nfl"
-  }
+  if (forceSport && snap) snap.sport = forceSport;
   const forceMarket = String(req.query.forceMarket || "");
-  if (forceMarket && snap) {
-    snap.market = forceMarket; // e.g., "NFL H2H"
-  }
+  if (forceMarket && snap) snap.market = forceMarket;
 
   const analysis = snap ? analyzeMarket(snap, { bypassDedupe: bypass }) : null;
 
   res.json({
-    ok: true,
-    sport,
-    limit,
+    ok: true, sport, limit, offset,
     has_snapshot: Boolean(snap),
     snapshot_keys: snap ? Object.keys(snap) : [],
     analysis_null: analysis === null,
@@ -245,14 +216,8 @@ app.get("/api/scan/mock", guard(async (req, res) => {
   }
 
   res.json({
-    sport: "nfl",
-    limit: 1,
-    pulled: 1,
-    analyzed: 1,
-    sent_to_telegram: sent,
-    timestamp_et: nowET(),
-    planned_jobs: ["NFL H2H (mock)"],
-    alerts: [alert],
+    sport: "nfl", limit: 1, pulled: 1, analyzed: 1, sent_to_telegram: sent,
+    timestamp_et: nowET(), planned_jobs: ["NFL H2H (mock)"], alerts: [alert]
   });
 }));
 
@@ -260,6 +225,7 @@ app.get("/api/scan/mock", guard(async (req, res) => {
 app.get("/api/scan/:sport", guard(async (req, res) => {
   const sport = String(req.params.sport || "").toLowerCase();
   const limit = Number(req.query.limit || process.env.MAX_EVENTS_PER_CALL || 3);
+  const offset = Number(req.query.offset || 0);
   const telegram = req.query.telegram === "true";
   const force = req.query.force === "1";
   const bypass = req.query.bypass === "1";
@@ -279,28 +245,23 @@ app.get("/api/scan/:sport", guard(async (req, res) => {
 
   if (!jobs.length) {
     return res.json({
-      sport,
-      limit,
-      pulled: 0,
-      analyzed: 0,
-      sent_to_telegram: 0,
-      timestamp_et: nowET(),
-      planned_jobs: plannedJobs,
-      alerts: [],
-      note: "No jobs enabled via env for this sport.",
+      sport, limit, pulled: 0, analyzed: 0, sent_to_telegram: 0,
+      timestamp_et: nowET(), planned_jobs: plannedJobs, alerts: [],
+      note: "No jobs enabled via env for this sport."
     });
   }
 
-  // fetch & slice
+  // fetch
   const snapshots = [];
   for (const job of jobs) {
-    const got = await job({ limit });
+    const got = await job({ limit, offset });
     if (Array.isArray(got) && got.length) snapshots.push(...got);
   }
+  // snapshots already sliced by fetchers; keep a safety slice
   const sliced = snapshots.slice(0, limit);
 
   // analyze
-  const analyzed = sliced.map((snap) => analyzeMarket(snap, { bypassDedupe: bypass })).filter(Boolean);
+  const analyzed = sliced.map(snap => analyzeMarket(snap, { bypassDedupe: bypass })).filter(Boolean);
 
   // telegram
   let sent = 0;
@@ -320,14 +281,12 @@ app.get("/api/scan/:sport", guard(async (req, res) => {
   }
 
   res.json({
-    sport,
-    limit,
+    sport, limit, offset,
     pulled: sliced.length,
     analyzed: analyzed.length,
     sent_to_telegram: sent,
     timestamp_et: nowET(),
-    planned_jobs: plannedJobs,
-    alerts: analyzed,
+    planned_jobs: plannedJobs, alerts: analyzed
   });
 }));
 

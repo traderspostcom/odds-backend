@@ -49,6 +49,72 @@ function wrapFetcher(label, fn) {
         .slice(0, MAX_BOOKS_PER_CALL);
     }
 
+    // --- Odds API → snapshot (NFL H2H) ---
+const BOOKS_WHITELIST = (process.env.BOOKS_WHITELIST || "")
+  .split(",")
+  .map(s => s.trim().toLowerCase())
+  .filter(Boolean);
+
+function filterBookKey(key) {
+  if (!key) return false;
+  const k = String(key).toLowerCase();
+  if (BOOKS_WHITELIST.length === 0) return true; // no filter
+  return BOOKS_WHITELIST.includes(k);
+}
+
+function toAmerican(n) {
+  // assume Odds API already returns american when oddsFormat=american
+  // but guard just in case it’s numeric string
+  if (n == null) return null;
+  const num = Number(n);
+  return Number.isFinite(num) ? num : null;
+}
+// GPT SUPPORT
+export function mapOddsEventToNFLH2HSnapshot(ev) {
+  // ev fields per Odds API v4: id, sport_key, commence_time, home_team, away_team, bookmakers: [{ key, title, markets: [{ key, outcomes: [...] }] }]
+  const home = ev.home_team;
+  const away = ev.away_team;
+
+  // Collect H2H market from each bookmaker
+  const offers = [];
+  for (const bm of ev.bookmakers || []) {
+    const bookKey = (bm.key || bm.title || "").toLowerCase();
+    if (!filterBookKey(bookKey)) continue;
+
+    const h2h = (bm.markets || []).find(m => (m.key || "").toLowerCase() === "h2h");
+    if (!h2h || !Array.isArray(h2h.outcomes)) continue;
+
+    // Find prices for home/away by matching team names (Odds API uses team names in outcomes.name)
+    const oHome = h2h.outcomes.find(o => (o.name || "").toLowerCase() === (home || "").toLowerCase());
+    const oAway = h2h.outcomes.find(o => (o.name || "").toLowerCase() === (away || "").toLowerCase());
+    if (!oHome || !oAway) continue;
+
+    const homeAmerican = toAmerican(oHome.price);
+    const awayAmerican = toAmerican(oAway.price);
+    if (homeAmerican == null || awayAmerican == null) continue;
+
+    offers.push({
+      book: bookKey,
+      prices: {
+        home: { american: homeAmerican },
+        away: { american: awayAmerican },
+      },
+    });
+  }
+
+  return {
+    sport: "nfl",
+    market: "NFL H2H",
+    gameId: ev.id,
+    home,
+    away,
+    commence_time: ev.commence_time, // UTC ISO from Odds API
+    // no splits for your plan, so tickets/handle undefined
+    offers, // <<< critical for EV analyzer
+  };
+}
+
+
     // Event cap (if upstream honors it)
     if (a.limit == null) a.limit = MAX_EVENTS_PER_CALL;
 

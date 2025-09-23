@@ -1,18 +1,18 @@
 // sharpEngine.js (root)
-// Hybrid analyzer: Splits → EV → Outlier, with optional dedupe bypass for testing.
-// This version adds dynamic verdicts, Kelly, Play-to, Edge% for the EV path (per Russ spec).
-// Outlier path is unchanged (we’ll upgrade it next after you confirm this is stable).
+// Hybrid analyzer: Splits → EV → Outlier, with optional dedupe bypass.
+// EV path already upgraded. This version upgrades OUTLIER with fair/EV/Kelly/Play-to,
+// plus quality gates: consensus size, z-filter outliers, staleness, steam/resistance, scarcity.
 
 import fs from "fs";
 
 /* ============================== ENV / KNOBS =============================== */
 const DIAG = envBool("DIAG", true);
 
-// EV thresholds (fractions used elsewhere; legacy keep)
-const LEAN_THRESHOLD   = envNum("LEAN_THRESHOLD", 0.010); // 1.0%
+// Legacy EV gates (kept for compatibility; dynamic verdicts override when used)
+const LEAN_THRESHOLD   = envNum("LEAN_THRESHOLD", 0.010);  // 1.0%
 const STRONG_THRESHOLD = envNum("STRONG_THRESHOLD", 0.020); // 2.0%
 
-// Outlier thresholds (price advantage vs market median, in “cents”)
+// Outlier diff gates (vs median, in “cents”)
 const OUT_DOG_LEAN   = envInt("OUTLIER_DOG_CENTS_LEAN", 10);
 const OUT_DOG_STRONG = envInt("OUTLIER_DOG_CENTS_STRONG", 18);
 const OUT_FAV_LEAN   = envInt("OUTLIER_FAV_CENTS_LEAN", 7);
@@ -24,11 +24,26 @@ const RAW_ALERT_BOOKS = (process.env.ALERT_BOOKS || "pinnacle")
 const ALERT_ALL   = RAW_ALERT_BOOKS.includes("*");
 const ALERT_BOOKS = RAW_ALERT_BOOKS.filter(b => b !== "*");
 
-// Simple re-alert state (cooldown 30m)
+// Quality gates (tunable via env; sensible defaults)
+const CONS_MIN_STRICT = envInt("CONSENSUS_MIN_BOOKS_STRICT", 5); // full power
+const CONS_MIN_LOOSE  = envInt("CONSENSUS_MIN_BOOKS_LOOSE", 3);  // degrade tier if 3–4
+const Z_MAX           = envNum("OUTLIER_SD_Z_MAX", 1.5);         // drop > 1.5 SD from mean
+const STALE_SECS      = envInt("STALE_SECS", 120);               // candidate older than peers by this
+const DISP_CENTS_STALE= envInt("DISPERSION_CENTS_FOR_STALE", 5); // need dispersion ≥ this to stale-flag
+const STEAM_WIN_SEC   = envInt("STEAM_WINDOW_SEC", 180);
+const STEAM_CENTS     = envInt("STEAM_CENTS", 5);
+const RESIST_WIN_SEC  = envInt("RESIST_WINDOW_SEC", 600);
+const RESIST_REVERSALS= envInt("RESIST_REVERSALS", 2);
+const SCARCITY_AT_MOST= envInt("SCARCITY_AT_MOST", 2);
+const EV_FLOOR_PCT    = envNum("EV_FLOOR_PERCENT", 0.25);        // don’t send < 0.25% EV
+
+// Simple re-alert state (cooldown 30m) + small history for steam/resistance
 const STATE_FILE = process.env.SHARP_STATE_FILE || "./sharp_state.json";
 let STATE = {};
 try { if (fs.existsSync(STATE_FILE)) STATE = JSON.parse(fs.readFileSync(STATE_FILE, "utf8") || "{}"); }
 catch { STATE = {}; }
+if (typeof STATE !== "object" || STATE === null) STATE = {};
+if (!STATE._hist) STATE._hist = {}; // { keySide: [ { ts, med }, ... ] up to ~50 }
 function saveState() { try { fs.writeFileSync(STATE_FILE, JSON.stringify(STATE, null, 2)); } catch {} }
 
 /* ================================= EXPORT ================================= */
@@ -44,14 +59,14 @@ export function analyzeMarket(snapshot, opts = {}) {
   const away    = snapshot.away || snapshot?.game?.away;
   const commence_time = snapshot.commence_time || snapshot?.game?.start_time_utc || null;
 
-  // 1) Splits path (if available)
+  // 1) Splits (when available)
   if (hasSplits(snapshot)) {
     const a = analyzeWithSplits(snapshot, { sport, market, gameId, home, away, commence_time }, { bypassDedupe });
     if (a) return a;
   }
 
-  // 2) EV / Outlier paths
-  const offers = normalizeOffers(snapshot); // per-book {book, home, away, last_update}
+  // 2) Price-based signals
+  const offers = normalizeOffers(snapshot); // {book, home, away, last_update}
   if (offers.length < 2) {
     diag(() => console.log(`diag[ANZ] ${away} @ ${home} | offers=${offers.length} (need ≥2)`));
     return null;
@@ -65,12 +80,13 @@ export function analyzeMarket(snapshot, opts = {}) {
     return null;
   }
 
-  // EV path (UPGRADED)
+  // EV (already upgraded)
   const evA = analyzeWithEV(all, target, nonTarget, { sport, market, gameId, home, away, commence_time }, { bypassDedupe });
-  if (evA) return evA;
+  if (evA) { recordMediansForHistory({ gameId, offers: all, home, away }); return evA; }
 
-  // Outlier path (legacy behavior)
-  const out = analyzeWithOutliers(all, target, { sport, market, gameId, home, away, commence_time }, { bypassDedupe });
+  // OUTLIER (upgraded here)
+  const out = analyzeWithOutliersUpgraded(all, target, nonTarget, { sport, market, gameId, home, away, commence_time }, { bypassDedupe });
+  recordMediansForHistory({ gameId, offers: all, home, away });
   if (out) return out;
 
   return null;
@@ -118,14 +134,10 @@ function analyzeWithSplits(s, meta, { bypassDedupe }) {
 }
 
 /* ================================ EV PATH ================================= */
-/** Build fair from consensus (exclude candidate book where possible), then
- *  compute EV, Edge, Kelly, Play-to, Verdict (dynamic by sport + time).
- */
 function analyzeWithEV(all, target, nonTarget, meta, { bypassDedupe }) {
   let best = null;
 
   for (const o of target) {
-    // consensus excluding candidate book; if empty, fall back to nonTarget or all
     let consensusPool = all.filter(x => x.book !== o.book);
     if (!consensusPool.length) consensusPool = nonTarget.length ? nonTarget : all;
 
@@ -133,7 +145,7 @@ function analyzeWithEV(all, target, nonTarget, meta, { bypassDedupe }) {
     if (!fair) continue;
 
     if (isFiniteNum(o.home)) {
-      const evH = evFromFair(o.home, fair.pHome); // fractional
+      const evH = evFromFair(o.home, fair.pHome);
       if (!best || evH > best.evPct) best = { side: "home", price: o.home, book: o.book, evPct: evH, fairN: fair.n, fairPH: fair.pHome };
     }
     if (isFiniteNum(o.away)) {
@@ -144,36 +156,28 @@ function analyzeWithEV(all, target, nonTarget, meta, { bypassDedupe }) {
 
   if (!best) return null;
 
-  // model prob for picked side
   const pModel = best.side === "home" ? best.fairPH : (1 - best.fairPH);
-  const evFrac = best.evPct; // 0.012 = 1.2%
+  const evFrac = best.evPct;
   const edgePct = (pModel - impliedProbAmerican(best.price)) * 100;
   const minutes = minutesToPost(meta.commence_time);
   const kellyRawPct = kellyFrac(best.price, pModel) * 100;
   const cap = sportCapPct(meta.sport);
   const kellyHalfPct = Math.min(cap, kellyRawPct / 2);
-
-  // Dynamic verdict by sport + time
   const verdict = decideVerdict({ sport: meta.sport, minutes, edgePct, evPct: evFrac * 100, kellyPct: kellyRawPct });
 
-  // Global floor to avoid noise
-  if (verdict === "pass" || evFrac * 100 < 0.25) {
+  if (verdict === "pass" || evFrac * 100 < EV_FLOOR_PCT) {
     diag(() => console.log(`diag[EV] ${meta.away} @ ${meta.home} | pass edge=${edgePct.toFixed(2)} ev=${(evFrac*100).toFixed(2)} kelly=${kellyRawPct.toFixed(2)}`));
     return null;
   }
 
   const team = best.side === "home" ? meta.home : meta.away;
-
-  // Play-to (EV=0) exact & rounded
   const playTo = playToFromProb(pModel);
-
-  // Map verdict -> legacy tier (keep downstream formatting stable)
   const tier = verdict === "strong" ? "strong" : "lean";
 
   return finalizeAlert({
     ...meta,
     source: "ev",
-    score: Math.round(evFrac * 10000) / 100, // preserve prior score style (EV%)
+    score: Math.round(evFrac * 10000) / 100,
     tier, side: best.side, team,
     entryLine: best.price, priceBook: best.book, evPct: evFrac,
     signals: [
@@ -191,60 +195,206 @@ function analyzeWithEV(all, target, nonTarget, meta, { bypassDedupe }) {
   });
 }
 
-/* =============================== OUTLIER PATH ============================== */
-// (Legacy behavior kept; we’ll enhance with same verdict/gates in next step.)
-function analyzeWithOutliers(all, target, meta, { bypassDedupe }) {
-  let best = null;
+/* ============================ OUTLIER (UPGRADED) ========================== */
+function analyzeWithOutliersUpgraded(all, target, nonTarget, meta, { bypassDedupe }) {
+  const results = [];
 
   for (const o of target) {
-    const others = all.filter(x => x.book !== o.book);
-    if (!others.length) continue;
+    const othersRaw = all.filter(x => x.book !== o.book);
+    if (othersRaw.length < CONS_MIN_LOOSE) continue;
 
-    const medHome = median(others.map(x => x.home).filter(isFiniteNum));
-    const medAway = median(others.map(x => x.away).filter(isFiniteNum));
+    // z-filter: drop books > Z_MAX SD off mean (per side)
+    const clean = (side) => {
+      const vals = othersRaw.map(x => x[side]).filter(isFiniteNum);
+      if (vals.length < CONS_MIN_LOOSE) return { pool: [], stats: null, dropped: 0 };
+      const mean = avg(vals), sdv = sd(vals);
+      if (!Number.isFinite(sdv) || sdv === 0) return { pool: [...othersRaw], stats: { mean, sd: 0 }, dropped: 0 };
+      const pool = othersRaw.filter(x => {
+        const z = Math.abs(((x[side]) - mean) / sdv);
+        return !Number.isFinite(z) || z <= Z_MAX;
+      });
+      const dropped = othersRaw.length - pool.length;
+      return { pool, stats: { mean, sd: sdv }, dropped };
+    };
 
-    if (isFiniteNum(o.home) && isFiniteNum(medHome)) {
-      const diff = o.home - medHome;
-      const isDog = o.home >= 0;
-      const leanGate = isDog ? OUT_DOG_LEAN : OUT_FAV_LEAN;
+    // Evaluate both sides for this candidate book
+    for (const side of ["home","away"]) {
+      const price = o[side];
+      if (!isFiniteNum(price)) continue;
+
+      const { pool, stats, dropped } = clean(side);
+      if (pool.length < CONS_MIN_LOOSE) continue;
+
+      // Median diff in cents vs cleaned pool
+      const medSide = median(pool.map(x => x[side]).filter(isFiniteNum));
+      if (!isFiniteNum(medSide)) continue;
+      const diff = price - medSide;
+      const isDog = price >= 0;
+      const leanGate   = isDog ? OUT_DOG_LEAN : OUT_FAV_LEAN;
       const strongGate = isDog ? OUT_DOG_STRONG : OUT_FAV_STRONG;
-      let tier = null; if (diff >= strongGate) tier = "strong"; else if (diff >= leanGate) tier = "lean";
-      if (tier) {
-        const s = { side: "home", price: o.home, book: o.book, diff, tier, med: medHome, othersN: others.length };
-        if (!best || rankTier(s.tier) > rankTier(best.tier) || s.diff > best.diff) best = s;
-      }
-    }
+      if (diff < leanGate) continue; // needs to clear least gate to even consider
 
-    if (isFiniteNum(o.away) && isFiniteNum(medAway)) {
-      const diff = o.away - medAway;
-      const isDog = o.away >= 0;
-      const leanGate = isDog ? OUT_DOG_LEAN : OUT_FAV_LEAN;
-      const strongGate = isDog ? OUT_DOG_STRONG : OUT_FAV_STRONG;
-      let tier = null; if (diff >= strongGate) tier = "strong"; else if (diff >= leanGate) tier = "lean";
-      if (tier) {
-        const s = { side: "away", price: o.away, book: o.book, diff, tier, med: medAway, othersN: others.length };
-        if (!best || rankTier(s.tier) > rankTier(best.tier) || s.diff > best.diff) best = s;
+      // Build fair from CONSENSUS (exclude candidate; use both sides for devig)
+      const fair = buildFairFrom(pool);
+      if (!fair) continue;
+
+      const pModel = side === "home" ? fair.pHome : (1 - fair.pHome);
+      const evFrac = evFromFair(price, pModel); // fractional EV per $1
+      const edgePct = (pModel - impliedProbAmerican(price)) * 100;
+      const minutes = minutesToPost(meta.commence_time);
+
+      // verdict by sport/time
+      let verdict = decideVerdict({ sport: meta.sport, minutes, edgePct, evPct: evFrac * 100, kellyPct: kellyFrac(price, pModel)*100 });
+
+      // consensus size downgrades
+      const consN = fair.n;
+      let consNote = null;
+      if (consN < CONS_MIN_STRICT && consN >= CONS_MIN_LOOSE) {
+        if (verdict === "strong") verdict = "medium";
+        consNote = "low_consensus";
       }
+      if (consN < CONS_MIN_LOOSE) continue;
+
+      // staleness guard: candidate older than median peer age by > STALE_SECS and dispersion ≥ threshold
+      const peerAges = pool.map(x => secsSinceISO(x.last_update)).filter(isFiniteNum);
+      const candAge  = secsSinceISO(o.last_update);
+      const disp = stats ? Math.abs(stats.sd || 0) : 0;
+      let stale = false;
+      if (isFiniteNum(candAge) && peerAges.length) {
+        const medAge = median(peerAges);
+        if ((candAge - medAge) > STALE_SECS && centsAbs(disp) >= DISP_CENTS_STALE) {
+          stale = true;
+          if (verdict === "strong") verdict = "medium";
+          else if (verdict === "medium") verdict = "pass";
+        }
+      }
+
+      // steam / resistance from recent median series (all books, side)
+      const keySide = `${meta.gameId || meta.home + "-" + meta.away}-${side}`;
+      const medSeries = getHistoryWindow(keySide, Math.max(STEAM_WIN_SEC, RESIST_WIN_SEC));
+      const nowMedAll = median(all.map(x => x[side]).filter(isFiniteNum));
+      if (Number.isFinite(nowMedAll)) pushHistoryPoint(keySide, nowMedAll);
+
+      let steamUp = false, resist = false;
+      if (medSeries.length >= 2) {
+        const pastSteam = medSeries.filter(p => (Date.now() - p.ts) <= STEAM_WIN_SEC*1000);
+        if (pastSteam.length >= 2) {
+          const oldest = pastSteam[0].med, newest = pastSteam[pastSteam.length-1].med;
+          const delta = newest - oldest; // cents change
+          // movement "toward your side" == worse price for that side → numeric decrease
+          if (delta <= -STEAM_CENTS) steamUp = true;
+        }
+        const pastRes = medSeries.filter(p => (Date.now() - p.ts) <= RESIST_WIN_SEC*1000);
+        if (pastRes.length >= 3) {
+          let rev = 0;
+          for (let i=2;i<pastRes.length;i++){
+            const a = pastRes[i-2].med, b=pastRes[i-1].med, c=pastRes[i].med;
+            const d1 = Math.sign(b-a), d2 = Math.sign(c-b);
+            if (d1 && d2 && d1 !== d2) rev++;
+          }
+          if (rev >= RESIST_REVERSALS) resist = true;
+        }
+      }
+      // apply upgrades/downgrades
+      if (steamUp && (verdict === "medium")) {
+        // allow upgrade if within 0.3%/0.2% of strong thresholds (approx via verdictThresholds)
+        const T = verdictThresholds(meta.sport, minutes);
+        const kPct = kellyFrac(price, pModel)*100;
+        const strongish = (edgePct >= (T.edgeS - 0.3)) && ((evFrac*100) >= (T.evS - 0.2));
+        if (strongish) verdict = "strong";
+      }
+      if (resist && (verdict === "strong")) verdict = "medium";
+
+      // Scarcity boost: if only 1–2 books offer play-to price or better, allow strong with edge ≥2.2% and EV 0.8–0.9%
+      const playTo = playToFromProb(pModel);
+      let scarce = false;
+      if (playTo) {
+        const playableCnt = all.filter(x => isPlayable(x[side], playTo.rounded)).length;
+        if (playableCnt <= SCARCITY_AT_MOST) {
+          scarce = true;
+          const evPct = evFrac*100;
+          if (verdict !== "strong" && edgePct >= 2.2 && evPct >= 0.8 && evPct <= 0.95) verdict = "strong";
+        }
+      }
+
+      // final EV floor
+      if (verdict === "pass" || (evFrac*100) < EV_FLOOR_PCT) continue;
+
+      // map verdict to legacy tier
+      const tier = verdict === "strong" ? "strong" : "lean";
+      const team = side === "home" ? meta.home : meta.away;
+      const cap = sportCapPct(meta.sport);
+      const kRaw = kellyFrac(price, pModel)*100;
+      const kHalf = Math.min(cap, kRaw/2);
+
+      const signals = [
+        { key:"consensus_n", label:`Consensus N=${(fair?.n)||0}`, weight:1 },
+        ...(dropped ? [{ key:"z_drop", label:`Dropped ${dropped} book(s) > ${Z_MAX}σ`, weight:1 }] : []),
+        { key:"median_ref",  label:`Median ${side.toUpperCase()} ${fmtAm(medSide)}`, weight:1 },
+        { key:"delta_cents", label:`+${Math.round(diff)}¢ vs market`, weight:2 },
+        { key:"edge_pct",    label:`Edge ${edgePct.toFixed(2)}%`, weight:2 },
+        { key:"ev_pct",      label:`+${(evFrac*100).toFixed(2)}% EV`, weight:2 },
+        { key:"kelly",       label:`Kelly ${kRaw.toFixed(1)}% / ½ ${kHalf.toFixed(1)}% (cap ${cap.toFixed(1)}%)`, weight:1 },
+        ...(playTo ? [{ key:"play_to", label:`Play-to ${playTo.exact} / ${playTo.rounded}`, weight:1 }] : []),
+        { key:"book",        label:`Book ${o.book}`, weight:1 },
+        { key:"verdict",     label:`Verdict ${verdict.toUpperCase()}`, weight:2 },
+        { key:"t2p",         label:`T-${minutesToPost(meta.commence_time)}m`, weight:1 },
+        ...(consNote ? [{ key:"consensus_note", label:"Low consensus (tier trimmed)", weight:1 }] : []),
+        ...(stale ? [{ key:"stale", label:`Stale by >${STALE_SECS}s`, weight:1 }] : []),
+        ...(steamUp ? [{ key:"steam", label:"Steam↑", weight:1 }] : []),
+        ...(resist ? [{ key:"resist", label:"Resistance↔", weight:1 }] : []),
+        ...(scarce ? [{ key:"scarce", label:"Scarce price", weight:1 }] : []),
+      ];
+
+      results.push({
+        meta, side, team, tier, verdict, price, book:o.book, evFrac, diff, medSide,
+        signals, pModel, playTo, consN: fair.n
+      });
     }
   }
 
-  if (!best) return null;
+  if (!results.length) return null;
 
-  const team = best.side === "home" ? meta.home : meta.away;
+  // pick best by verdict > diff > EV
+  results.sort((a,b)=>{
+    const rank = v => v.verdict==="strong"?2 : v.verdict==="medium"?1:0;
+    if (rank(b)!==rank(a)) return rank(b)-rank(a);
+    if (Math.round(b.diff)!==Math.round(a.diff)) return Math.round(b.diff)-Math.round(a.diff);
+    return (b.evFrac - a.evFrac);
+  });
+  const best = results[0];
+  const { meta, side, team, tier, price, book, evFrac, signals } = best;
+
   return finalizeAlert({
     ...meta,
     source: "outlier",
     score: Math.round(best.diff),
-    tier: best.tier, side: best.side, team,
-    entryLine: best.price, priceBook: best.book, evPct: null,
-    signals: [
-      { key: "consensus_n", label: `Consensus N=${best.othersN}`, weight: 1 },
-      { key: "median_ref",  label: `Median ${best.side.toUpperCase()} ${fmtAm(best.med)}`, weight: 1 },
-      { key: "delta_cents", label: `+${Math.round(best.diff)}¢ vs market`, weight: 2 },
-      { key: "book",        label: `Book ${best.book}`, weight: 1 },
-    ],
-    bypassDedupe,
+    tier, side, team,
+    entryLine: price, priceBook: book, evPct: evFrac,
+    signals,
+    bypassDedupe: false,
   });
+}
+
+/* ====================== HISTORY (steam / resistance) ====================== */
+function recordMediansForHistory({ gameId, offers, home, away }) {
+  const keyH = `${gameId}-home`;
+  const keyA = `${gameId}-away`;
+  const medH = median(offers.map(o => o.home).filter(isFiniteNum));
+  const medA = median(offers.map(o => o.away).filter(isFiniteNum));
+  if (Number.isFinite(medH)) pushHistoryPoint(keyH, medH);
+  if (Number.isFinite(medA)) pushHistoryPoint(keyA, medA);
+}
+function pushHistoryPoint(key, med) {
+  const arr = STATE._hist[key] || [];
+  arr.push({ ts: Date.now(), med });
+  while (arr.length > 60) arr.shift();
+  STATE._hist[key] = arr;
+  saveState();
+}
+function getHistoryWindow(key, seconds) {
+  const cut = Date.now() - seconds*1000;
+  return (STATE._hist[key] || []).filter(p => p.ts >= cut);
 }
 
 /* ============================= FAIR/EV HELPERS ============================ */
@@ -261,20 +411,15 @@ function buildFairFrom(consensusOffers) {
   if (!rows.length) return null;
   return { pHome: avg(rows), n: rows.length };
 }
-
 function evFromFair(american, fairP) {
   const dec = americanToDecimal(american);
-  return fairP * (dec - 1) - (1 - fairP); // fractional EV per $1 stake
+  return fairP * (dec - 1) - (1 - fairP);
 }
 
 /* ================================= UTIL =================================== */
-// Accepts either:
-//  A) offers: [{book, team, american, decimal?, last_update?}, ...] + game.home/away
-//  B) offers: [{book, prices: {home:{american}, away:{american}}}, ...]
 function normalizeOffers(snap) {
   const out = [];
   const perBook = new Map();
-
   const homeName = snap.home || snap?.game?.home;
   const awayName = snap.away || snap?.game?.away;
 
@@ -282,18 +427,14 @@ function normalizeOffers(snap) {
     const book = String(o.book || o.bookmaker || o.key || "").toLowerCase().trim();
     if (!book) continue;
 
-    // shape A: flat team rows
     if (o.team && (o.american != null)) {
       const row = perBook.get(book) || { book, home: undefined, away: undefined, last_update: o.last_update || null };
       if (o.team === homeName) row.home = num(o.american, row.home);
       else if (o.team === awayName) row.away = num(o.american, row.away);
-      // if last_update newer, keep it
       row.last_update = newerISO(row.last_update, o.last_update);
       perBook.set(book, row);
       continue;
     }
-
-    // shape B: nested prices
     const home = num(o?.prices?.home?.american, undefined);
     const away = num(o?.prices?.away?.american, undefined);
     if (isFiniteNum(home) || isFiniteNum(away)) {
@@ -319,6 +460,7 @@ function newerISO(prev, next) {
   if (!Number.isFinite(a) || !Number.isFinite(b)) return prev;
   return b > a ? next : prev;
 }
+function secsSinceISO(s) { const t = Date.parse(s); return Number.isFinite(t) ? Math.round((Date.now()-t)/1000) : NaN; }
 
 function hasSplits(s) { return typeof s?.tickets === "number" && typeof s?.handle === "number"; }
 
@@ -327,7 +469,8 @@ function decimalToAmerican(d) { return d >= 2 ? Math.round((d - 1) * 100) : Math
 function impliedFromAmerican(a) { const n = Number(a); if (!Number.isFinite(n)) return NaN; return n > 0 ? 100/(n+100) : Math.abs(n)/(Math.abs(n)+100); }
 function impliedProbAmerican(a) { return impliedFromAmerican(a); }
 
-/* --------------------------- Alert Construction --------------------------- */
+function isPlayable(american, playToRounded) { return Number.isFinite(american) && Number.isFinite(playToRounded) && (american >= playToRounded); }
+
 function finalizeAlert({
   sport, market, gameId, home, away, commence_time,
   source, score, tier, side, team, entryLine, priceBook, evPct, signals, bypassDedupe,
@@ -351,7 +494,6 @@ function finalizeAlert({
   }
   if (!allow) return null;
 
-  // Persist (still update even on forced to keep state consistent)
   STATE[key] = { ts: now, entryLine: entryLine ?? null, side };
   saveState();
 
@@ -376,7 +518,6 @@ function finalizeAlert({
 }
 
 /* ------------------------------ Verdict Logic ----------------------------- */
-// Time to post (minutes)
 function minutesToPost(commence_time) {
   if (!commence_time) return 9999;
   const t = Date.parse(commence_time);
@@ -388,9 +529,8 @@ function leagueBand(sport) {
   if (sport === "nfl" || sport === "nba") return "NFL_NBA";
   if (sport === "mlb" || sport === "nhl") return "MLB_NHL";
   if (sport === "ncaaf" || sport === "ncaab" || sport === "wnba") return "NCAA_WNBA";
-  return "MLB_NHL"; // default conservative
+  return "MLB_NHL";
 }
-// base thresholds per band, then adjust by time to post
 function verdictThresholds(sport, minutes) {
   const band = leagueBand(sport);
   let edgeS, evS, kellyS, edgeMmin, edgeMmax, evMmin, evMmax;
@@ -401,13 +541,8 @@ function verdictThresholds(sport, minutes) {
   } else { // NCAA_WNBA
     edgeS=3.0; evS=1.0; kellyS=3.0; edgeMmin=1.0; edgeMmax=2.9; evMmin=0.2; evMmax=0.9;
   }
-  if (minutes >= 360) { // T-6h or more → loosen slightly
-    edgeS -= 0.3; evS -= 0.2;
-    edgeMmin = Math.max(0, edgeMmin - 0.3); evMmin = Math.max(0, evMmin - 0.2);
-  } else if (minutes <= 60) { // last hour → tighten
-    edgeS += 0.3; evS += 0.2;
-    edgeMmin += 0.3; evMmin += 0.2;
-  }
+  if (minutes >= 360) { edgeS -= 0.3; evS -= 0.2; edgeMmin = Math.max(0, edgeMmin - 0.3); evMmin = Math.max(0, evMmin - 0.2); }
+  else if (minutes <= 60) { edgeS += 0.3; evS += 0.2; edgeMmin += 0.3; evMmin += 0.2; }
   return { edgeS, evS, kellyS, edgeMmin, edgeMmax, evMmin, evMmax };
 }
 function decideVerdict({ sport, minutes, edgePct, evPct, kellyPct }) {
@@ -427,13 +562,8 @@ function playToFromProb(pModel) {
 }
 function roundConservative(am) {
   const step = 5;
-  if (am < 0) { // favorite: toward 0 (cheaper)
-    const q = Math.trunc(Math.abs(am) / step);
-    return -(q * step); // -141 -> -140
-  } else {     // dog: down
-    const q = Math.trunc(am / step);
-    return q * step;    // +132 -> +130
-  }
+  if (am < 0) { const q = Math.trunc(Math.abs(am) / step); return -(q * step); } // -141 -> -140
+  else { const q = Math.trunc(am / step); return q * step; }                     // +132 -> +130
 }
 function kellyFrac(american, pModel) {
   const dec = americanToDecimal(american);
@@ -445,7 +575,7 @@ function kellyFrac(american, pModel) {
 }
 function sportCapPct(sport) {
   const band = leagueBand(sport);
-  if (band === "MLB_NHL") return 1.0; // per Russ: 1.0%
+  if (band === "MLB_NHL") return 1.0; // per Russ
   return 2.0; // NFL/NBA/NCAAF/NCAAB/WNBA
 }
 
@@ -454,7 +584,9 @@ function americanBetter(curr, prev) { if (!isFiniteNum(curr) || !isFiniteNum(pre
 function fmtAm(a) { return a >= 0 ? `+${a}` : `${a}`; }
 function rankTier(t) { return t === "strong" ? 2 : 1; }
 function avg(a){let s=0;for(const x of a)s+=x;return a.length?s/a.length:NaN;}
+function sd(a){const m=avg(a);const v=avg(a.map(x=>(x-m)*(x-m)));return Math.sqrt(v);}
 function median(a){const b=[...a].sort((x,y)=>x-y);const n=b.length;if(!n)return NaN;const m=Math.floor(n/2);return n%2?b[m]:(b[m-1]+b[m])/2;}
+function centsAbs(x){return Math.abs(Number(x)||0);}
 function isFiniteNum(x){return Number.isFinite(Number(x));}
 function num(x,def=undefined){const n=Number(x);return Number.isFinite(n)?n:def;}
 function envNum(k,def){const n=Number(process.env[k]);return Number.isFinite(n)?n:def;}

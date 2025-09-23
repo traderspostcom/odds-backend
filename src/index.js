@@ -4,7 +4,15 @@ import cors from "cors";
 import { FETCHERS } from "./fetchers.js";
 import { analyzeMarket } from "../sharpEngine.js";
 
-/* ------------------------------ ENV / SAFETY ------------------------------ */
+/* ----------------------------- Global crash guards ----------------------------- */
+process.on("unhandledRejection", (err) => {
+  console.error("UNHANDLED_REJECTION:", err?.stack || err);
+});
+process.on("uncaughtException", (err) => {
+  console.error("UNCAUGHT_EXCEPTION:", err?.stack || err);
+});
+
+/* -------------------------------- ENV / SAFETY -------------------------------- */
 const PORT = process.env.PORT || 3000;
 
 const HARD_KILL = flag("HARD_KILL", false);
@@ -14,7 +22,7 @@ const DIAG = flag("DIAG", true);
 
 const MANUAL_MAX_JOBS = num("MANUAL_MAX_JOBS", 1);
 const MAX_JOBS_PER_SPORT = num("MAX_JOBS_PER_SPORT", 1);
-const MAX_EVENTS_PER_CALL = num("MAX_EVENTS_PER_CALL", 1);
+const MAX_EVENTS_PER_CALL = num("MAX_EVENTS_PER_CALL", 1); // fetchers honor this
 
 const ENABLE_NFL_H2H = flag("ENABLE_NFL_H2H", true);
 
@@ -25,18 +33,18 @@ const ODDS_API_REGION = (process.env.ODDS_API_REGION || "us").toString();
 const BOOKS_WHITELIST = (process.env.BOOKS_WHITELIST || "").toString();
 const ALERT_BOOKS = (process.env.ALERT_BOOKS || "pinnacle").toString();
 
-/* ------------------------------ APP BOOTSTRAP ----------------------------- */
+/* --------------------------------- APP BOOT --------------------------------- */
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-/* ------------------------------ HARD KILL GATE ---------------------------- */
+/* -------------------------------- HARD KILL -------------------------------- */
 if (HARD_KILL) {
   app.all("*", (_req, res) => {
     res.status(503).json({ error: "service_unavailable", note: "HARD_KILL=true" });
   });
 } else {
-  /* --------------------------------- Health -------------------------------- */
+  /* --------------------------------- Health --------------------------------- */
   app.get("/health", (_req, res) => {
     res.json({
       ok: true,
@@ -60,11 +68,9 @@ if (HARD_KILL) {
     });
   });
 
-  /* --------------------------- Provider diagnostics ------------------------- */
-  // Alias both paths so typos can't bite us
-  app.get(["/diag/provider", "/api/diag/provider"], providerDiagHandler);
-
-  async function providerDiagHandler(_req, res) {
+  /* --------------------------- Provider diagnostics -------------------------- */
+  // FREE ping to The Odds API to validate key & gate
+  app.get(["/diag/provider", "/api/diag/provider"], async (_req, res) => {
     try {
       if (!ODDS_API_ENABLED) {
         return res.json({
@@ -81,19 +87,13 @@ if (HARD_KILL) {
           hint: "Add ODDS_API_KEY in Render → Environment and redeploy.",
         });
       }
-
-      // This endpoint is free on The Odds API; safe to call for key validation
       const url = `https://api.the-odds-api.com/v4/sports?apiKey=${encodeURIComponent(
         ODDS_API_KEY
       )}`;
       const r = await fetch(url, { method: "GET" });
       const text = await r.text();
       let body;
-      try {
-        body = JSON.parse(text);
-      } catch {
-        body = text;
-      }
+      try { body = JSON.parse(text); } catch { body = text; }
 
       return res.status(r.ok ? 200 : 400).json({
         ok: r.ok,
@@ -105,13 +105,41 @@ if (HARD_KILL) {
         response_sample: Array.isArray(body) ? body.slice(0, 3) : body,
       });
     } catch (e) {
-      return res
-        .status(500)
-        .json({ ok: false, error: "provider_diag_failed", message: e?.message || String(e) });
+      return res.status(500).json({ ok: false, error: "provider_diag_failed", message: e?.message || String(e) });
     }
-  }
+  });
 
-  /* ---------------------- Zero-credit Telegram test ping -------------------- */
+  /* ---------------------- Scan diagnostics (no Telegram) --------------------- */
+  // Shows books seen per event so we know why EV may/not fire
+  // GET /api/diag/scan/nfl?limit=3
+  app.get("/api/diag/scan/:sport", async (req, res) => {
+    try {
+      const sport = String(req.params.sport || "").toLowerCase();
+      const limit = clampInt(req.query.limit, 3, 1, 20);
+      if (sport !== "nfl") return res.status(400).json({ ok: false, error: "unsupported_sport" });
+
+      const out = [];
+      const snaps = await FETCHERS.fetchNFLH2H({ limit });
+      for (const s of snaps) {
+        const books = Array.from(
+          new Set((s?.offers || []).map(o => (o.book || o.bookmaker || "").toLowerCase()).filter(Boolean))
+        );
+        out.push({
+          gameId: s.gameId,
+          away: s.away,
+          home: s.home,
+          commence_time: s.commence_time,
+          offers_count: s?.offers?.length || 0,
+          books,
+        });
+      }
+      return res.json({ ok: true, pulled: snaps.length, events: out });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: "scan_diag_failed", message: e?.message || String(e) });
+    }
+  });
+
+  /* ---------------------- Zero-credit Telegram test ping --------------------- */
   // GET /api/telegram/test?text=Hello&force=1
   app.get("/api/telegram/test", async (req, res) => {
     try {
@@ -137,15 +165,15 @@ if (HARD_KILL) {
     }
   });
 
-  /* -------------------------- Mock scan → Telegram -------------------------- */
-  // MUST be above /api/scan/:sport to avoid :sport=mock capture
+  /* --------------------------- Mock scan → Telegram -------------------------- */
+  // MUST be above /api/scan/:sport
   // GET /api/scan/mock?telegram=true&force=1
   app.get("/api/scan/mock", async (req, res) => {
     try {
       const wantTelegram = toBool(req.query.telegram, false);
       const force = toBool(req.query.force, false);
 
-      // Synthetic snapshot that guarantees an EV alert (no provider calls)
+      // Synthetic snapshot guaranteeing an EV alert (no provider calls)
       const snapshot = {
         sport: "nfl",
         market: "NFL H2H",
@@ -153,15 +181,11 @@ if (HARD_KILL) {
         home: "Mockers",
         away: "Testers",
         commence_time: new Date(Date.now() + 3 * 3600e3).toISOString(), // +3h
-
-        // SPLITS (kept for completeness; EV path will fire regardless)
         tickets: 40,
         handle: 60,
         hold: 0.02,
         side: "home",
         line: -105,
-
-        // EV path: 3-book market with a clear edge at Pinnacle
         offers: [
           { book: "pinnacle",   prices: { home: { american: 120 }, away: { american: -130 } } },
           { book: "draftkings", prices: { home: { american: 105 }, away: { american: -115 } } },
@@ -169,13 +193,22 @@ if (HARD_KILL) {
         ],
       };
 
-      const alert = analyzeMarket(snapshot);
-      let sent = 0;
+      let alert = null;
+      try {
+        alert = analyzeMarket(snapshot);
+      } catch (e) {
+        console.error("analyze_mock_error:", e?.stack || e);
+      }
 
+      let sent = 0;
       if (alert && wantTelegram && (force || AUTO_TELEGRAM)) {
-        const txt = formatAlertForTelegram(alert);
-        const result = await sendTelegram(txt);
-        if (result.ok) sent = 1;
+        try {
+          const txt = formatAlertForTelegram(alert);
+          const result = await sendTelegram(txt);
+          if (result.ok) sent = 1;
+        } catch (e) {
+          console.error("telegram_send_mock_error:", e?.stack || e);
+        }
       }
 
       return res.status(200).json(
@@ -196,7 +229,7 @@ if (HARD_KILL) {
     }
   });
 
-  /* ------------------------------ Manual scan ------------------------------ */
+  /* -------------------------------- Manual scan ----------------------------- */
   // GET /api/scan/nfl?limit=1&telegram=true
   app.get("/api/scan/:sport", async (req, res) => {
     try {
@@ -215,7 +248,6 @@ if (HARD_KILL) {
       if (planned_jobs.length === 0) {
         return res.json(summary({ sport, limit, pulled: 0, analyzed: 0, sent: 0, planned_jobs }));
       }
-
       if (dryrun) {
         return res.json(summary({ sport, limit, pulled: 0, analyzed: 0, sent: 0, planned_jobs }));
       }
@@ -225,30 +257,45 @@ if (HARD_KILL) {
       let analyzed = 0;
       let sent = 0;
       const alerts = [];
+      const errors = [];
 
       for (const job of jobsToRun) {
-        if (job === "NFL H2H") {
-          const snaps = await FETCHERS.fetchNFLH2H({ limit });
-          pulled += snaps.length;
+        if (job !== "NFL H2H") continue;
 
-          for (const snap of snaps) {
+        let snaps = [];
+        try {
+          snaps = await FETCHERS.fetchNFLH2H({ limit });
+        } catch (e) {
+          errors.push({ stage: "fetchNFLH2H", message: e?.message || String(e) });
+          snaps = [];
+        }
+        pulled += snaps.length;
+
+        for (const snap of snaps) {
+          try {
             const alert = analyzeMarket(snap);
-            if (alert) {
-              analyzed++;
-              alerts.push(alert);
-              if (wantTelegram && AUTO_TELEGRAM) {
+            if (!alert) continue;
+            analyzed++;
+            alerts.push(alert);
+
+            if (wantTelegram && AUTO_TELEGRAM) {
+              try {
                 const txt = formatAlertForTelegram(alert);
                 const result = await sendTelegram(txt);
                 if (result.ok) sent++;
+              } catch (e) {
+                errors.push({ stage: "telegram_send", message: e?.message || String(e) });
               }
             }
+          } catch (e) {
+            errors.push({ stage: "analyzeMarket", message: e?.message || String(e) });
           }
         }
       }
 
-      return res.json(
-        summary({ sport, limit, pulled, analyzed, sent, planned_jobs, alerts })
-      );
+      const body = summary({ sport, limit, pulled, analyzed, sent, planned_jobs, alerts });
+      if (DIAG && errors.length) body.errors = errors;
+      return res.json(body);
     } catch (e) {
       console.error("scan_error:", e?.stack || e);
       return res.status(500).json({ error: "scan_failed", message: e?.message || String(e) });
@@ -256,12 +303,12 @@ if (HARD_KILL) {
   });
 }
 
-/* --------------------------------- SERVER --------------------------------- */
+/* ---------------------------------- SERVER --------------------------------- */
 app.listen(PORT, () => {
   console.log(`odds-backend listening on :${PORT}`);
 });
 
-/* ------------------------------ Telegram util ----------------------------- */
+/* ------------------------------ Telegram utils ----------------------------- */
 async function sendTelegram(text) {
   const token = process.env.TELEGRAM_BOT_TOKEN || "";
   const chatId = process.env.TELEGRAM_CHAT_ID || "";
@@ -309,7 +356,7 @@ function formatAlertForTelegram(a) {
     .join("\n");
 }
 
-/* --------------------------------- Helpers -------------------------------- */
+/* ----------------------------------- Helpers -------------------------------- */
 function flag(k, def = false) {
   const v = process.env[k];
   if (v == null) return def;

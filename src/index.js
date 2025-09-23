@@ -64,6 +64,62 @@ if (HARD_KILL) {
         });
       }
 
+/* -------------------------- Mock scan → Telegram -------------------------- */
+// Usage:
+//   GET /api/scan/mock?telegram=true&force=1
+// Creates a synthetic sharp alert (no provider calls) and (optionally) sends it to Telegram.
+app.get("/api/scan/mock", async (req, res) => {
+  try {
+    const wantTelegram = toBool(req.query.telegram, false);
+    const force = toBool(req.query.force, false);
+
+    // Synthetic snapshot that passes the SPLITS gates (no provider / no credits)
+    const snapshot = {
+      sport: "nfl",
+      market: "NFL H2H",
+      gameId: `mock-${Date.now()}`,
+      home: "Mockers",
+      away: "Testers",
+      commence_time: new Date(Date.now() + 3 * 3600e3).toISOString(), // +3h
+      // SPLITS path fields (so analyzer doesn't need offers[])
+      tickets: 40,     // ≤ maxTicketsPct (45)
+      handle: 60,      // ≥ minHandlePct (55)
+      hold: 0.04,      // ≤ hold.max (0.05 default)
+      side: "home",
+      line: -105       // for re-alert comparisons in state
+    };
+
+    const alert = analyzeMarket(snapshot);
+    if (!alert) {
+      return res.status(200).json({
+        ok: true,
+        note: "mock_created_but_filtered",
+        detail: "Analyzer returned null. If this happens, your score thresholds are higher than mock score.",
+        snapshot
+      });
+    }
+
+    let sent = 0;
+    if (wantTelegram && (force || process.env.AUTO_TELEGRAM === "true")) {
+      const txt = formatAlertForTelegram(alert);
+      const result = await sendTelegram(txt);
+      if (result.ok) sent = 1;
+    }
+
+    return res.status(200).json({
+      ok: true,
+      sport: "nfl",
+      pulled: 1,
+      analyzed: 1,
+      sent_to_telegram: sent,
+      alert
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "mock_scan_failed", message: e?.message || String(e) });
+  }
+});
+
+      
       const send = await sendTelegram(text);
       return res.status(send.ok ? 200 : 400).json(send);
     } catch (e) {

@@ -177,6 +177,36 @@ app.get("/api/debug/analyze/:sport", guard(async (req, res) => {
   const snaps = await fetcher({ limit });
   const snap = Array.isArray(snaps) && snaps.length ? snaps[0] : null;
 
+  // TEMP: allow overriding the snapshot's sport label for debugging
+  const forceSport = String(req.query.forceSport || "").toLowerCase();
+  if (forceSport && snap) {
+    snap.sport = forceSport;   // <-- override happens HERE
+  }
+
+  // run analyzer
+  const analysis = snap ? analyzeMarket(snap, { bypassDedupe: bypass }) : null;
+
+  res.json({
+    ok: true,
+    sport,
+    limit,
+    has_snapshot: Boolean(snap),
+    snapshot_keys: snap ? Object.keys(snap) : [],
+    analysis_null: analysis === null,
+    analysis,
+  });
+}));
+
+  // pick fetcher
+  let fetcher = null;
+  if (sport === "nfl") fetcher = getNFLH2HNormalized;
+  else if (sport === "mlb") fetcher = getMLBH2HNormalized;
+  else if (sport === "ncaaf") fetcher = getNCAAFH2HNormalized;
+  else return res.status(400).json({ ok: false, error: "unsupported_sport" });
+
+  const snaps = await fetcher({ limit });
+  const snap = Array.isArray(snaps) && snaps.length ? snaps[0] : null;
+
   // run analyzer (same call path as scans)
   const analysis = snap ? analyzeMarket(snap, { bypassDedupe: bypass }) : null;
 

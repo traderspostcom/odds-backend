@@ -3,6 +3,18 @@
 // Endpoints: /run (dry), /run-tg (force TG), /ping (health).
 // Cron runs only 07:00–23:00 ET. Requires SCAN_KEY secret to match Render SCAN_KEY.
 
+process.on("unhandledRejection", (err) => {
+  console.error("unhandledRejection", String(err?.stack || err));
+});
+process.on("uncaughtException", (err) => {
+  console.error("uncaughtException", String(err?.stack || err));
+});
+console.log("[boot] starting odds-backend", {
+  node: process.version,
+  cwd: process.cwd(),
+  port: process.env.PORT || 3000,
+});
+
 const BACKEND = "https://odds-backend-oo4k.onrender.com";
 
 /* ---------------------------- small helpers ---------------------------- */

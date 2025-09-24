@@ -512,3 +512,5 @@ function safeJson(s) {
     return String(s);
   }
 }
+wrangler deploy
+wrangler tail odds-scan-cron --format=pretty

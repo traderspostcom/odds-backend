@@ -1,7 +1,8 @@
 // src/fetchers.js
-// Two-step fetching to control credits:
+// Two-step fetching to control credits + per-event odds cache (TTL 60s):
 // 1) List eventIds (cheap): /v4/sports/{sportKey}/events?daysFrom=1
 // 2) Fetch odds per event:  /v4/sports/{sportKey}/events/{eventId}/odds?markets=h2h&...
+//    -> now cached in-memory so repeated scans within TTL cost 0 extra credits.
 
 const ODDS_BASE = "https://api.the-odds-api.com/v4";
 
@@ -21,13 +22,16 @@ const EVENTS_DAYS_FROM = Number(process.env.ODDS_EVENTS_DAYS || 1);
 // Small TTL (seconds) to avoid double-list calls during quick manual tests.
 const EVENTS_CACHE_TTL = Number(process.env.CACHE_TTL_SECONDS || 30);
 
+// NEW: Per-event odds cache TTL (seconds). Repeated scans within TTL reuse odds.
+const ODDS_CACHE_TTL = Number(process.env.ODDS_CACHE_TTL || 60);
+
 /* ================================ CACHE (IDs) ================================ */
 const _eventsCache = new Map(); // key -> { ts, data }
-function _cacheKeyEvents(sportKey) {
+function _eventsKey(sportKey) {
   return `events:${sportKey}:daysFrom=${EVENTS_DAYS_FROM}`;
 }
-function _getCachedEvents(sportKey) {
-  const k = _cacheKeyEvents(sportKey);
+function _eventsGet(sportKey) {
+  const k = _eventsKey(sportKey);
   const entry = _eventsCache.get(k);
   if (!entry) return null;
   if ((Date.now() - entry.ts) / 1000 > EVENTS_CACHE_TTL) {
@@ -36,9 +40,29 @@ function _getCachedEvents(sportKey) {
   }
   return entry.data;
 }
-function _setCachedEvents(sportKey, data) {
-  const k = _cacheKeyEvents(sportKey);
+function _eventsSet(sportKey, data) {
+  const k = _eventsKey(sportKey);
   _eventsCache.set(k, { ts: Date.now(), data });
+}
+
+/* ============================ CACHE (per-event odds) ======================== */
+const _oddsCache = new Map(); // key -> { ts, data }
+function _oddsKey(sportKey, eventId, market, booksCsv) {
+  return `odds:${sportKey}:${eventId}:${market}:${booksCsv}`;
+}
+function _oddsGet(sportKey, eventId, market, booksCsv) {
+  const k = _oddsKey(sportKey, eventId, market, booksCsv);
+  const entry = _oddsCache.get(k);
+  if (!entry) return null;
+  if ((Date.now() - entry.ts) / 1000 > ODDS_CACHE_TTL) {
+    _oddsCache.delete(k);
+    return null;
+  }
+  return entry.data;
+}
+function _oddsSet(sportKey, eventId, market, booksCsv, data) {
+  const k = _oddsKey(sportKey, eventId, market, booksCsv);
+  _oddsCache.set(k, { ts: Date.now(), data });
 }
 
 /* =========================== LOW-LEVEL PROVIDER CALLS ======================== */
@@ -60,12 +84,11 @@ async function fetchEventIds(sportKey) {
   const url = `${ODDS_BASE}/sports/${sportKey}/events?${params.toString()}`;
 
   // cache
-  const cached = _getCachedEvents(sportKey);
+  const cached = _eventsGet(sportKey);
   if (cached) return cached;
 
   const data = await fetchJson(url);
   if (!Array.isArray(data)) return [];
-  // Keep just the fields we need
   const events = data.map(e => ({
     id: e.id,
     sport_key: e.sport_key,
@@ -74,33 +97,38 @@ async function fetchEventIds(sportKey) {
     away_team: e.away_team,
   })).filter(e => e && e.id);
 
-  _setCachedEvents(sportKey, events);
+  _eventsSet(sportKey, events);
   return events;
 }
 
-// 2) Fetch odds for a single eventId (predictable burn = per-event × books)
+// 2) Fetch odds for a single eventId (predictable burn = per-event × books) with cache
 async function fetchOddsForEvent(sportKey, eventId, market, extra = {}) {
   if (!ODDS_ENABLED()) return null;
   const apiKey = API_KEY(); if (!apiKey) return null;
 
+  const booksCsv = getBooksWhitelist().join(",");
   const params = new URLSearchParams({
     apiKey,
     regions: getRegion(),
     markets: market,              // e.g., "h2h"
     oddsFormat: "american",
     dateFormat: "iso",
-    bookmakers: getBooksWhitelist().join(","),
+    bookmakers: booksCsv,
   });
   for (const [k, v] of Object.entries(extra)) {
     if (v !== undefined && v !== null && v !== "") params.set(k, String(v));
   }
 
+  // try cache first
+  const cached = _oddsGet(sportKey, eventId, market, booksCsv);
+  if (cached) return cached;
+
   const url = `${ODDS_BASE}/sports/${sportKey}/events/${eventId}/odds?${params.toString()}`;
   const data = await fetchJson(url);
   if (!data || typeof data !== "object") return null;
 
-  // The event odds shape: { id, sport_key, commence_time, home_team, away_team, bookmakers: [...] }
-  const booksAllowed = new Set(getBooksWhitelist());
+  // normalize allowable books immediately for consistency
+  const booksAllowed = new Set(booksCsv.split(",").map(s => s.trim().toLowerCase()).filter(Boolean));
   const books = Array.isArray(data.bookmakers)
     ? data.bookmakers
         .filter(bm => bm && booksAllowed.has(String(bm.key || "").toLowerCase()))
@@ -112,7 +140,7 @@ async function fetchOddsForEvent(sportKey, eventId, market, extra = {}) {
         }))
     : [];
 
-  return {
+  const eventOdds = {
     id: data.id,
     sport_key: data.sport_key,
     commence_time: data.commence_time,
@@ -120,6 +148,9 @@ async function fetchOddsForEvent(sportKey, eventId, market, extra = {}) {
     away: data.away_team,
     bookmakers: books,
   };
+
+  _oddsSet(sportKey, eventId, market, booksCsv, eventOdds);
+  return eventOdds;
 }
 
 /* =============================== NORMALIZATION ============================== */
@@ -129,7 +160,6 @@ function normalizeH2HFromEventOdds(eventOdds, { sport, market } = {}) {
   const homeName = eventOdds.home || eventOdds.home_team;
   const awayName = eventOdds.away || eventOdds.away_team;
 
-  // Aggregate one offer per BOOK with both sides nested under prices.home/away
   const offersByBook = new Map();
 
   for (const bm of eventOdds.bookmakers || []) {
@@ -182,9 +212,6 @@ function normalizeH2HFromEventOdds(eventOdds, { sport, market } = {}) {
 }
 
 /* =========================== SPORT / MARKET WRAPPERS ======================== */
-// IMPORTANT: We now respect limit/offset by FIRST selecting eventIds, THEN fetching odds per ID.
-// This makes credits scale with your limit instead of the provider’s default batch.
-
 export async function getNFLH2HNormalized({ limit = 3, offset = 0 } = {}) {
   const sportKey = "americanfootball_nfl";
   const market = "h2h";
@@ -228,11 +255,8 @@ export async function getNCAAFH2HNormalized({ limit = 3, offset = 0 } = {}) {
 }
 
 /* ================================ DIAGNOSTICS =============================== */
-// Lists books per game, honoring limit via eventIds + per-event odds (predictable burn).
 export async function diagListBooksForSport(sport, { limit = 3, offset = 0 } = {}) {
   let sportKey = null;
-  let sportName = sport;
-
   if (sport === "nfl") sportKey = "americanfootball_nfl";
   else if (sport === "mlb") sportKey = "baseball_mlb";
   else if (sport === "ncaaf") sportKey = "americanfootball_ncaaf";

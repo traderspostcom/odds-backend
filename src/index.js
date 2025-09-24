@@ -26,7 +26,7 @@ import {
   diagListBooksForSport
 } from "./fetchers.js";
 
-import { analyzeMarket } from "./sharpEngine.js";
+import { analyzeMarket } from "../sharpEngine.js";
 
 // ----------------------------------------------------------------------------
 // App bootstrap

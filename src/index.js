@@ -30,6 +30,17 @@ function isETOpen() {
   return mm === 0;                       // exactly 23:00 -> open, 23:01+ -> closed
 }
 
+/** fetch with timeout that works on all CF runtimes */
+async function fetchWithTimeout(url, init = {}, ms = 9000) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort("timeout"), ms);
+  try {
+    return await fetch(url, { ...init, signal: ac.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 /** One backend scan (sport="mlb"|"nfl"|...). send=true forces TG on backend side */
 async function scanOnce(sport, { offset = 0, send = false } = {}, env) {
   const qs = new URLSearchParams({
@@ -39,14 +50,13 @@ async function scanOnce(sport, { offset = 0, send = false } = {}, env) {
     force: send ? "1" : "0",
   });
   const url = `${BACKEND}/api/scan/${sport}?${qs.toString()}`;
-  const res = await fetch(url, {
+  const res = await fetchWithTimeout(url, {
     headers: {
       "X-Scan-Origin": "cf-cron",
       "X-Scan-Key": env.SCAN_KEY,       // must equal Render env SCAN_KEY
       "User-Agent": "cf-cron/1.0",
     },
-    signal: AbortSignal.timeout(9000),  // keep from hanging
-  });
+  }, 9000);
   const txt = await res.text();
   return { ok: res.ok, status: res.status, body: safeJSON(txt) };
 }
@@ -59,7 +69,7 @@ async function fetchHandler(request, env) {
   // credit-free connectivity probe to backend
   if (path === "/ping") {
     try {
-      const r = await fetch(`${BACKEND}/health`, { signal: AbortSignal.timeout(9000) });
+      const r = await fetchWithTimeout(`${BACKEND}/health`, {}, 9000);
       const t = await r.text();
       return json({ ok: r.ok, status: r.status, body: safeJSON(t) });
     } catch (e) {

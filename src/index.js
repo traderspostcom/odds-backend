@@ -1,122 +1,66 @@
-// odds-cron/src/index.js
-// Cloudflare Worker that pings your Render backend on schedule or via HTTP.
-// Endpoints: /run (dry), /run-tg (force TG), /ping (health).
-// Cron runs only 07:00–23:00 ET. Requires SCAN_KEY secret to match Render SCAN_KEY.
+// src/index.js
+// Main entrypoint for odds-backend service
 
-const BACKEND = "https://odds-backend-oo4k.onrender.com";
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import { analyzeMarket } from "../sharpEngine.js"; // ✅ correct path
 
-/* ---------------------------- small helpers ---------------------------- */
-const json = (obj, status = 200) =>
-  new Response(JSON.stringify(obj, null, 2), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
+dotenv.config();
 
-const safeJSON = (txt) => {
-  try { return JSON.parse(txt); } catch { return txt; }
-};
+const app = express();
+const PORT = process.env.PORT || 10000;
 
-/** Is New York time within 07:00 → 23:00 (inclusive of exactly 23:00)? */
-function isETOpen() {
-  const now = new Date();
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    hour12: false,
-    hour: "2-digit",
-    minute: "2-digit",
-  }).formatToParts(now);
-  const hh = Number(parts.find((p) => p.type === "hour").value);
-  const mm = Number(parts.find((p) => p.type === "minute").value);
-  if (hh < 7) return false;  // before 07:00 -> closed
-  if (hh < 23) return true;  // 07:00..22:59 -> open
-  return mm === 0;           // exactly 23:00 -> open, 23:01+ -> closed
-}
+app.use(cors());
+app.use(express.json());
 
-/** fetch with timeout that works on Workers */
-async function fetchWithTimeout(url, init = {}, ms = 9000) {
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort("timeout"), ms);
-  try {
-    return await fetch(url, { ...init, signal: ac.signal });
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-/** One backend scan (sport="mlb"|"nfl"|...). send=true forces TG on backend side */
-async function scanOnce(sport, { offset = 0, send = false } = {}, env) {
-  const qs = new URLSearchParams({
-    limit: "1",
-    offset: String(offset),
-    telegram: send ? "true" : "false",
-    force: send ? "1" : "0",
-  });
-  const url = `${BACKEND}/api/scan/${sport}?${qs.toString()}`;
-  const res = await fetchWithTimeout(url, {
-    headers: {
-      "X-Scan-Origin": "cf-cron",
-      "X-Scan-Key": env.SCAN_KEY, // must equal Render env SCAN_KEY
-      "User-Agent": "cf-cron/1.0",
+/* --------------------------- Basic Health Check -------------------------- */
+app.get("/health", (req, res) => {
+  res.json({
+    ok: true,
+    env: {
+      HARD_KILL: process.env.HARD_KILL || false,
+      SCAN_ENABLED: process.env.SCAN_ENABLED || false,
+      AUTO_TELEGRAM: process.env.AUTO_TELEGRAM || false,
+      DIAG: process.env.DIAG || false,
     },
-  }, 9000);
-  const txt = await res.text();
-  return { ok: res.ok, status: res.status, body: safeJSON(txt) };
-}
+    ts: new Date().toISOString(),
+  });
+});
 
-/* ------------------------------ HTTP fetch ----------------------------- */
-async function fetchHandler(request, env) {
-  const url = new URL(request.url);
-  const path = url.pathname;
+/* ----------------------------- Scan Endpoint ----------------------------- */
+app.get("/api/scan/:sport", async (req, res) => {
+  const { sport } = req.params;
+  const { limit = 1, offset = 0, telegram = "false", force = "0" } = req.query;
 
-  // credit-free connectivity probe to backend
-  if (path === "/ping") {
-    try {
-      const r = await fetchWithTimeout(`${BACKEND}/health`, {}, 9000);
-      const t = await r.text();
-      return json({ ok: r.ok, status: r.status, body: safeJSON(t) });
-    } catch (e) {
-      return json({ ok: false, error: String(e) }, 599);
-    }
+  try {
+    const alerts = await analyzeMarket({
+      sport,
+      limit: Number(limit),
+      offset: Number(offset),
+      telegram: telegram === "true",
+      force: force === "1",
+    });
+
+    res.json({
+      sport,
+      limit: Number(limit),
+      pulled: alerts.length,
+      analyzed: alerts.filter(a => a.analyzed).length,
+      sent_to_telegram: alerts.filter(a => a.sent_to_telegram).length,
+      timestamp_et: new Date().toLocaleString("en-US", {
+        timeZone: "America/New_York"
+      }),
+      planned_jobs: [`${sport.toUpperCase()} H2H`],
+      alerts,
+    });
+  } catch (err) {
+    console.error("[scan_error]", err);
+    res.status(500).json({ ok: false, error: String(err) });
   }
+});
 
-  if (path === "/run" || path === "/run-tg") {
-    const send = path === "/run-tg";
-    const sports = (url.searchParams.get("sports") || "mlb")
-      .split(",").map((s) => s.trim()).filter(Boolean);
-    const offset = Number(url.searchParams.get("offset") || "0") || 0;
-
-    const results = {};
-    for (const s of sports) {
-      try {
-        results[s] = await scanOnce(s, { offset, send }, env);
-      } catch (e) {
-        results[s] = { ok: false, error: String(e) };
-      }
-    }
-    return json({ ok: true, origin: "cf-cron", send, results });
-  }
-
-  return json({ ok: true, name: "odds-scan-cron" });
-}
-
-/* ------------------------------ CRON entry ----------------------------- */
-export async function scheduled(event, env, ctx) {
-  if (!isETOpen()) { console.log("cron_skip_outside_ET_window"); return; }
-
-  const sportsCsv = env.SCAN_SPORTS || "mlb"; // e.g., "mlb,nfl,ncaaf"
-  const offset = Number(env.SCAN_OFFSET || "0") || 0;
-
-  const sports = sportsCsv.split(",").map((s) => s.trim()).filter(Boolean);
-  for (const s of sports) {
-    try {
-      const r = await scanOnce(s, { offset, send: false }, env);
-      console.log("cron_scan", s, r.status,
-        typeof r.body === "object" ? (r.body.analyzed ?? r.body.pulled ?? 0) : 0);
-    } catch (e) {
-      console.log("cron_error", s, String(e));
-    }
-  }
-}
-
-/* --------------------------- default export ---------------------------- */
-export default { fetch: fetchHandler, scheduled };
+/* ------------------------------- Start App ------------------------------- */
+app.listen(PORT, () => {
+  console.log(`odds-backend listening on :${PORT}`);
+});

@@ -9,12 +9,20 @@ const ODDS_BASE = "https://api.the-odds-api.com/v4";
 /* ================================ ENV / KNOBS ================================ */
 const ODDS_ENABLED = () => (String(process.env.ODDS_API_ENABLED || "true").toLowerCase() === "true");
 const API_KEY = () => process.env.ODDS_API_KEY || "";
-const getRegion = () =>
-  (process.env.ODDS_API_REGION || "us")
-    .split(",").map(s => s.trim()).filter(Boolean).join(",");
-const getBooksWhitelist = () =>
-  (process.env.BOOKS_WHITELIST || "pinnacle,draftkings,betmgm,fanduel,caesars,bet365")
-    .split(",").map(s => s.trim()).filter(Boolean);
+const ODDS_BASE = "https://api.the-odds-api.com/v4";
+
+const getRegion = () => {
+  const v = (process.env.ODDS_API_REGION || "").trim();
+  if (!v) return "";                 // no default; caller must set in Render
+  return v.split(",").map(s => s.trim()).filter(Boolean).join(",");
+};
+
+const getBooksWhitelist = () => {
+  const v = (process.env.BOOKS_WHITELIST || "").trim();
+  if (!v) return [];                 // empty means "no books allowed"
+  return v.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+};
+
 
 // How far ahead to list events (in days). Small = fewer IDs returned = less burn later.
 const EVENTS_DAYS_FROM = Number(process.env.ODDS_EVENTS_DAYS || 1);

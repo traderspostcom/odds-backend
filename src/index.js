@@ -314,28 +314,45 @@ app.get("/api/scan/:sport", gateScan, guard(async (req, res) => {
   const ua     = req.get("user-agent") || "-";
   const ip     = req.get("cf-connecting-ip") || req.get("x-forwarded-for") || req.ip || "-";
   const sport  = String(req.params.sport || "").toLowerCase();
-  const sendQueryFlag = req.query.telegram === "true"; // manual override
+
+  // NEW: allow either the query flag OR AUTO_TELEGRAM env to trigger sends
+  const sendQueryFlag = req.query.telegram === "true";     // manual override per-request
+  const autoTelegram  = BOOL(process.env.AUTO_TELEGRAM, false);
+  const telegram      = sendQueryFlag || autoTelegram;     // final decision
+
   const oddsOn = String(process.env.ODDS_API_ENABLED || "true").toLowerCase();
 
   console.log(
-    `[scan] sport=${sport} send=${sendQueryFlag} origin=${origin} ip=${ip} ua="${ua}" odds_api_enabled=${oddsOn} qs=${JSON.stringify(req.query)}`
+    `[scan] sport=${sport} send=${telegram} origin=${origin} ip=${ip} ua="${ua}" odds_api_enabled=${oddsOn} qs=${JSON.stringify(req.query)}`
   );
 
-  const limit  = Number(req.query.limit  || process.env.MAX_EVENTS_PER_CALL || 3);
-  const offset = Number(req.query.offset || 0);
-  const force  = req.query.force  === "1";
-  const bypass = req.query.bypass === "1";
+  const limit   = Number(req.query.limit  || process.env.MAX_EVENTS_PER_CALL || 3);
+  const offset  = Number(req.query.offset || 0);
+  const force   = req.query.force  === "1";
+  const bypass  = req.query.bypass === "1";
 
   const plannedJobs = [];
   const jobs = [];
 
   if (sport === "nfl") {
-    if (BOOL(process.env.ENABLE_NFL_H2H, true)) { plannedJobs.push("NFL H2H"); jobs.push(getNFLH2HNormalized); }
+    if (BOOL(process.env.ENABLE_NFL_H2H, true)) {
+      plannedJobs.push("NFL H2H");
+      jobs.push(getNFLH2HNormalized);
+    }
   } else if (sport === "mlb") {
-    if (BOOL(process.env.ENABLE_MLB_H2H, true)) { plannedJobs.push("MLB H2H"); jobs.push(getMLBH2HNormalized); }
-    if (BOOL(process.env.ENABLE_MLB_F5_H2H, false)) { plannedJobs.push("MLB F5 H2H"); /* add F5 fetcher here if/when present */ }
+    if (BOOL(process.env.ENABLE_MLB_H2H, true)) {
+      plannedJobs.push("MLB H2H");
+      jobs.push(getMLBH2HNormalized);
+    }
+    if (BOOL(process.env.ENABLE_MLB_F5_H2H, false)) {
+      plannedJobs.push("MLB F5 H2H");
+      // add F5 fetcher here if/when present
+    }
   } else if (sport === "ncaaf") {
-    if (BOOL(process.env.ENABLE_NCAAF_H2H, true)) { plannedJobs.push("NCAAF H2H"); jobs.push(getNCAAFH2HNormalized); }
+    if (BOOL(process.env.ENABLE_NCAAF_H2H, true)) {
+      plannedJobs.push("NCAAF H2H");
+      jobs.push(getNCAAFH2HNormalized);
+    }
   } else {
     return res.status(400).json({ error: "unsupported_sport", sport });
   }
@@ -347,6 +364,56 @@ app.get("/api/scan/:sport", gateScan, guard(async (req, res) => {
       note: "No jobs enabled via env for this sport."
     });
   }
+
+  // fetch snapshots (ask for offset+limit then slice)
+  const snapshots = [];
+  for (const job of jobs) {
+    const take = Math.max(0, (offset || 0) + (limit || 0));
+    const got = await job({ limit: take || limit || 1 });
+    if (Array.isArray(got) && got.length) {
+      const sliced = offset > 0 ? got.slice(offset, offset + limit) : got.slice(0, limit);
+      snapshots.push(...sliced);
+    }
+  }
+
+  const pulled = snapshots.length;
+  const alerts = [];
+  let analyzed = 0;
+  let sent_to_telegram = 0;
+
+  for (const snap of snapshots) {
+    const normalized = {
+      id: snap.id || snap.gameId || undefined,
+      gameId: snap.id || snap.gameId || undefined,
+      sport: snap.sport || sport,
+      market: snap.market || (sport.toUpperCase() + " H2H"),
+      home: snap?.game?.home || snap.home,
+      away: snap?.game?.away || snap.away,
+      commence_time: snap?.game?.start_time_utc || snap.start_time_utc || snap.commence_time || null,
+      game: snap.game || { away: snap.away, home: snap.home, start_time_utc: snap.commence_time },
+      offers: snap.offers || [],
+      source_meta: snap.source_meta || {}
+    };
+
+    const a = analyzeMarket(normalized, { bypassDedupe: bypass });
+    if (a) { analyzed += 1; alerts.push(a); }
+  }
+
+  // send to Telegram if enabled by query OR env
+  if (telegram && alerts.length) {
+    for (const a of alerts) {
+      const text = formatAlertForTelegram(a);
+      const r = await sendTelegram(text, { force });
+      if (r.ok) sent_to_telegram += 1;
+    }
+  }
+
+  res.json({
+    sport, limit, pulled, analyzed, sent_to_telegram,
+    timestamp_et: nowET(), planned_jobs: plannedJobs, alerts
+  });
+}));
+
 
   // fetch snapshots (ask for offset+limit then slice)
   const snapshots = [];

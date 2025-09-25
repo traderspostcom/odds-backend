@@ -86,6 +86,18 @@ async function sendTelegram(text, { force = false } = {}) {
  * Nicer, card-like alert formatting for Telegram (HTML parse mode).
  * Works with the alert shape returned by `analyzeMarket(...)` in your repo.
  */
+function formatNum(n, digits = 2) {
+  return (Math.round(n * Math.pow(10, digits)) / Math.pow(10, digits)).toFixed(digits);
+}
+
+function formatPct(x, digits = 2) {
+  // accepts 0.1234 or 12.34 — normalizes to percent string
+  if (x == null || isNaN(x)) return null;
+  const v = Math.abs(x) <= 1 ? x * 100 : x; // treat ≤1 as fraction
+  const sign = v >= 0 ? "+" : "";
+  return `${sign}${formatNum(v, digits)}%`;
+}
+
 function formatAlertForTelegram(a) {
   const when = a?.game?.start_time_utc
     ? new Date(a.game.start_time_utc).toLocaleString("en-US", { timeZone: "America/New_York" })
@@ -99,18 +111,22 @@ function formatAlertForTelegram(a) {
   const tag  = Array.isArray(a?.render?.tags) ? a.render.tags.join(", ") : (a?.source || "").toUpperCase();
   const emoji = a?.render?.emoji || "📊";
   const title = a?.render?.title || "Sharp Signal";
-  const strength = a?.render?.strength || ""; // e.g. "🟢 Strong"
+  const strength = a?.render?.strength || ""; // e.g. "🟢 Strong" or "Lean"
   const pickTeam = a?.sharp_side?.team || "-";
   const pickSide = a?.sharp_side?.side || "-";
 
   const away = a?.game?.away || a?.away || "-";
   const home = a?.game?.home || a?.home || "-";
 
-  // Optional extras if present
-  const hold = typeof a?.hold === "number" ? `Hold: ${(a.hold * 100).toFixed(2)}%` : null;
-  const tickets = typeof a?.tickets === "number" ? `${a.tickets}%` : null;
-  const handle  = typeof a?.handle === "number" ? `${a.handle}%` : null;
-  const splits  = (tickets != null && handle != null) ? `Tickets ${tickets} | Handle ${handle}` : null;
+  // Optional metrics
+  const holdPct   = (typeof a?.hold === "number") ? formatPct(a.hold, 2) : null;
+  const evPct     = (a?.ev != null)   ? formatPct(a.ev, 2) : (a?.metrics?.ev != null ? formatPct(a.metrics.ev, 2) : null);
+  const edgePct   = (a?.edge != null) ? formatPct(a.edge, 2) : (a?.metrics?.edge != null ? formatPct(a.metrics.edge, 2) : null);
+  const kellyFrac = (a?.kelly != null) ? formatNum(a.kelly, 2) : (a?.metrics?.kelly != null ? formatNum(a.metrics.kelly, 2) : null);
+
+  const tickets = (typeof a?.tickets === "number") ? `${a.tickets}%` : null;
+  const handle  = (typeof a?.handle  === "number") ? `${a.handle}%`  : null;
+  const splits  = (tickets && handle) ? `Tickets ${tickets} | Handle ${handle}` : null;
 
   const header = `<b>${emoji} ${title}</b>${strength ? `  <i>${strength}</i>` : ""}`;
   const matchup = `⚔️ <b>${away}</b> @ <b>${home}</b>`;
@@ -119,7 +135,25 @@ function formatAlertForTelegram(a) {
   const pickLine = `✅ Pick: <b>${pickTeam}</b> (${pickSide})  @ <code>${line}</code>  on <b>${book}</b>`;
   const tagLine = tag ? `🏷️ <i>${tag}</i>` : null;
 
-  const extras = [splits, hold].filter(Boolean).join(" • ");
+  const metrics = [
+    evPct    ? `📈 EV: <b>${evPct}</b>` : null,
+    edgePct  ? `🧮 Edge: <b>${edgePct}</b>` : null,
+    kellyFrac!= null ? `🏦 Kelly: <b>${kellyFrac}</b>` : null,
+    holdPct  ? `💰 Hold: <b>${holdPct}</b>` : null,
+    splits
+  ].filter(Boolean).join(" • ");
+
+  return [
+    header,
+    matchup,
+    timeLine,
+    marketLine,
+    pickLine,
+    tagLine,
+    metrics ? `\n${metrics}` : null
+  ].filter(Boolean).join("\n");
+}
+
 
   // Keep it compact; Telegram messages max ~4k chars, but we’re well under.
   return [

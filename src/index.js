@@ -1,25 +1,34 @@
-// src/index.js (ESM)
-// Odds Backend – Render
+// src/index.js (ESM) — Odds Backend (Render)
+// ----------------------------------------------------
 
 import express from "express";
 import cors from "cors";
 
+// Provider fetchers (you already have these files)
 import {
   getNFLH2HNormalized,
   getMLBH2HNormalized,
   getNCAAFH2HNormalized,
-  diagListBooksForSport
+  diagListBooksForSport,
+  // if you later add F5 fetcher, import it here:
+  // getMLBF5H2HNormalized,
 } from "./fetchers.js";
 
+// Sharp analyzer (you already have this file)
 import { analyzeMarket } from "../sharpEngine.js";
 
+// ----------------------------------------------------
+// App bootstrap
+// ----------------------------------------------------
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "256kb" }));
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT || 10000);
 
-/* ------------------------------- helpers -------------------------------- */
+// ----------------------------------------------------
+// Utilities
+// ----------------------------------------------------
 function BOOL(v, def = false) {
   if (v == null) return def;
   const s = String(v).trim().toLowerCase();
@@ -27,18 +36,23 @@ function BOOL(v, def = false) {
   if (["0", "false", "no", "n"].includes(s)) return false;
   return def;
 }
+
 function nowET(d = new Date()) {
   return d.toLocaleString("en-US", { timeZone: "America/New_York" });
 }
-function safeJson(s) { try { return JSON.parse(s); } catch { return String(s); } }
+
+function safeJson(s) {
+  try { return JSON.parse(s); } catch { return String(s); }
+}
 
 function guard(fn) {
   return async (req, res) => {
-    try { await fn(req, res); }
-    catch (err) {
+    try {
+      await fn(req, res);
+    } catch (err) {
       console.error("handler_error", {
         path: req.path,
-        msg: String((err && err.message) || err),
+        message: (err && err.message) || String(err),
         stack: err && err.stack
       });
       res.status(500).json({ ok: false, error: "internal_error" });
@@ -46,30 +60,41 @@ function guard(fn) {
   };
 }
 
-// scan key gate (optional enable via env: SCAN_KEY set)
+// ----------------------------------------------------
+// Scan gate (optional) — requires x-scan-key if SCAN_KEY is set
+// ----------------------------------------------------
 function gateScan(req, res, next) {
   const required = process.env.SCAN_KEY;
   if (!required) return next();
   const provided = req.get("x-scan-key") || req.query.scan_key || "";
-  if (provided !== required) return res.status(401).json({ ok: false, error: "scan_key_required" });
+  if (provided !== required) {
+    return res.status(401).json({ ok: false, error: "scan_key_required" });
+  }
   next();
 }
 
-/* -------------------------------- TG ------------------------------------ */
-// NOTE: We use HTML parse mode for nicer formatting (no Markdown escaping headaches).
+// ----------------------------------------------------
+// Telegram helpers
+// Node 20+ has global fetch; if you’re on older Node, add: import fetch from "node-fetch";
+// ----------------------------------------------------
 async function sendTelegram(text, { force = false } = {}) {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
+  const token  = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
-  const auto = BOOL(process.env.AUTO_TELEGRAM, false);
+  const auto   = BOOL(process.env.AUTO_TELEGRAM, false);
 
-  if (!token || !chatId) return { ok: false, error: "telegram_not_configured" };
-  if (!auto && !force)   return { ok: false, skipped: true, reason: "AUTO_TELEGRAM=false and force!=1" };
+  if (!token || !chatId) {
+    return { ok: false, error: "telegram_not_configured" };
+  }
+  // Only send automatically if AUTO_TELEGRAM=true OR the call forced it
+  if (!auto && !force) {
+    return { ok: false, skipped: true, reason: "AUTO_TELEGRAM=false and not forced" };
+  }
 
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
   const body = {
     chat_id: chatId,
     text,
-    parse_mode: "HTML",
+    parse_mode: "Markdown",
     disable_web_page_preview: true
   };
 
@@ -78,122 +103,114 @@ async function sendTelegram(text, { force = false } = {}) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body)
   });
+
   const j = await r.json().catch(() => ({}));
-  return { ok: r.ok && j.ok, status: r.status, body: j };
+  const ok = !!(r.ok && j && j.ok !== false);
+  if (!ok) {
+    console.error("telegram_send_failed", { status: r.status, body: j });
+  }
+  return { ok, status: r.status, body: j };
 }
 
 /**
- * Nicer, card-like alert formatting for Telegram (HTML parse mode).
- * Works with the alert shape returned by `analyzeMarket(...)` in your repo.
+ * Map market keys to compact labels for TG
  */
-function formatNum(n, digits = 2) {
-  return (Math.round(n * Math.pow(10, digits)) / Math.pow(10, digits)).toFixed(digits);
+function mapMarketKey(market = "") {
+  const norm = String(market).toLowerCase().replace(/[_\-\s]/g, "");
+  if (norm === "h2h" || norm === "h2h1st5innings") return "ML";
+  if (norm === "totals" || norm === "totals1st5innings") return "TOT";
+  if (norm === "spreads" || norm === "spreads1st5innings") return "SP";
+  if (norm === "teamtotals" || norm === "teamtotals1st5innings") return "TT";
+  return (market || "").toUpperCase();
 }
 
-function formatPct(x, digits = 2) {
-  // accepts 0.1234 or 12.34 — normalizes to percent string
-  if (x == null || isNaN(x)) return null;
-  const v = Math.abs(x) <= 1 ? x * 100 : x; // treat ≤1 as fraction
-  const sign = v >= 0 ? "+" : "";
-  return `${sign}${formatNum(v, digits)}%`;
-}
-
+/**
+ * Format one alert object for Telegram.
+ * If your analyzer attaches ev/kelly/strength/tags, they’ll show up.
+ */
 function formatAlertForTelegram(a) {
-  const when = a?.game?.start_time_utc
-    ? new Date(a.game.start_time_utc).toLocaleString("en-US", { timeZone: "America/New_York" })
-    : "-";
+  const game = a?.game || {};
+  const away = a?.away || game.away || "-";
+  const home = a?.home || game.home || "-";
 
-  const book = a?.lines?.book || "-";
-  const line = a?.lines?.sharp_entry != null
+  // kickoff time
+  const tRaw = game.start_time_utc || a?.commence_time || null;
+  let tET = "TBD";
+  if (tRaw) {
+    try {
+      const dt = new Date(tRaw);
+      tET = dt.toLocaleTimeString("en-US", {
+        timeZone: "America/New_York",
+        hour: "numeric",
+        minute: "2-digit"
+      });
+    } catch (_) { tET = String(tRaw); }
+  }
+
+  const market = mapMarketKey(a?.market || (a?.sport ? `${String(a.sport).toUpperCase()} H2H` : "H2H"));
+
+  // Sharp side and price line if present
+  const sharpTeam = a?.sharp_side?.team || a?.sharp_side?.side || "-";
+  const sharpLine = (a?.lines?.sharp_entry != null)
     ? (a.lines.sharp_entry >= 0 ? `+${a.lines.sharp_entry}` : `${a.lines.sharp_entry}`)
     : "-";
+  const onBook = a?.lines?.book || (a?.best && a.best.book) || "-";
 
-  const tag  = Array.isArray(a?.render?.tags) ? a.render.tags.join(", ") : (a?.source || "").toUpperCase();
-  const emoji = a?.render?.emoji || "📊";
-  const title = a?.render?.title || "Sharp Signal";
-  const strength = a?.render?.strength || ""; // e.g. "🟢 Strong" or "Lean"
-  const pickTeam = a?.sharp_side?.team || "-";
-  const pickSide = a?.sharp_side?.side || "-";
+  // Strength/tag badges if your analyzer provides them
+  const strength = a?.render?.strength || a?.strength || "";
+  const tagLabel = Array.isArray(a?.render?.tags) ? a.render.tags.join(", ")
+                    : (a?.source ? String(a.source).toUpperCase() : "");
 
-  const away = a?.game?.away || a?.away || "-";
-  const home = a?.game?.home || a?.home || "-";
+  const ev = (typeof a?.metrics?.ev === "number") ? a.metrics.ev : (typeof a?.ev === "number" ? a.ev : null);
+  const kelly = (typeof a?.metrics?.kelly === "number") ? a.metrics.kelly : (typeof a?.kelly === "number" ? a.kelly : null);
 
-  // Optional metrics
-  const holdPct   = (typeof a?.hold === "number") ? formatPct(a.hold, 2) : null;
-  const evPct     = (a?.ev != null)   ? formatPct(a.ev, 2) : (a?.metrics?.ev != null ? formatPct(a.metrics.ev, 2) : null);
-  const edgePct   = (a?.edge != null) ? formatPct(a.edge, 2) : (a?.metrics?.edge != null ? formatPct(a.metrics.edge, 2) : null);
-  const kellyFrac = (a?.kelly != null) ? formatNum(a.kelly, 2) : (a?.metrics?.kelly != null ? formatNum(a.metrics.kelly, 2) : null);
+  const pieces = [];
+  pieces.push(`${a?.render?.emoji || "🚨"} *Sharp Signal*${strength ? ` ${strength}` : ""}${tagLabel ? `  [${tagLabel}]` : ""}`);
+  pieces.push(`🕒 ${tET} ET`);
+  pieces.push(`🏟️ ${away} @ ${home}`);
+  pieces.push(`🎯 Market: ${market}`);
+  pieces.push(`🧭 Pick: *${sharpTeam}* @ ${sharpLine} on *${onBook}*`);
+  if (ev != null || kelly != null) {
+    const evStr = ev != null ? `EV: ${ev.toFixed ? ev.toFixed(2) : ev}` : null;
+    const kStr  = kelly != null ? `Kelly: ${kelly.toFixed ? kelly.toFixed(2) : kelly}` : null;
+    pieces.push(`📈 ${[evStr, kStr].filter(Boolean).join(" | ")}`);
+  }
+  if (a?.hold != null) {
+    pieces.push(`💰 Hold: ${(a.hold * 100).toFixed(2)}%`);
+  }
 
-  const tickets = (typeof a?.tickets === "number") ? `${a.tickets}%` : null;
-  const handle  = (typeof a?.handle  === "number") ? `${a.handle}%`  : null;
-  const splits  = (tickets && handle) ? `Tickets ${tickets} | Handle ${handle}` : null;
-
-  const header = `<b>${emoji} ${title}</b>${strength ? `  <i>${strength}</i>` : ""}`;
-  const matchup = `⚔️ <b>${away}</b> @ <b>${home}</b>`;
-  const timeLine = `🕒 <b>${when} ET</b>`;
-  const marketLine = `🎯 <b>${a?.market || "Market"}</b>`;
-  const pickLine = `✅ Pick: <b>${pickTeam}</b> (${pickSide})  @ <code>${line}</code>  on <b>${book}</b>`;
-  const tagLine = tag ? `🏷️ <i>${tag}</i>` : null;
-
-  const metrics = [
-    evPct    ? `📈 EV: <b>${evPct}</b>` : null,
-    edgePct  ? `🧮 Edge: <b>${edgePct}</b>` : null,
-    kellyFrac!= null ? `🏦 Kelly: <b>${kellyFrac}</b>` : null,
-    holdPct  ? `💰 Hold: <b>${holdPct}</b>` : null,
-    splits
-  ].filter(Boolean).join(" • ");
-
-  return [
-    header,
-    matchup,
-    timeLine,
-    marketLine,
-    pickLine,
-    tagLine,
-    metrics ? `\n${metrics}` : null
-  ].filter(Boolean).join("\n");
+  return pieces.join("\n");
 }
 
+// ----------------------------------------------------
+// Routes
+// ----------------------------------------------------
 
-  // Keep it compact; Telegram messages max ~4k chars, but we’re well under.
-  return [
-    header,
-    matchup,
-    timeLine,
-    marketLine,
-    pickLine,
-    tagLine,
-    extras ? `\n${extras}` : null
-  ].filter(Boolean).join("\n");
-}
-
-/* -------------------------------- routes -------------------------------- */
-
-// Health
-app.get("/health", guard(async (req, res) => {
+// Health: shows effective env (echo-only where appropriate)
+app.get("/health", guard(async (_req, res) => {
   const env = {
     HARD_KILL: BOOL(process.env.HARD_KILL, false),
-    SCAN_ENABLED: BOOL(process.env.SCAN_ENABLED, false),
+    SCAN_ENABLED: BOOL(process.env.SCAN_ENABLED, true),
     AUTO_TELEGRAM: BOOL(process.env.AUTO_TELEGRAM, false),
     DIAG: BOOL(process.env.DIAG, true),
 
     MANUAL_MAX_JOBS: Number(process.env.MANUAL_MAX_JOBS || 1),
     MAX_JOBS_PER_SPORT: Number(process.env.MAX_JOBS_PER_SPORT || 1),
-    MAX_EVENTS_PER_CALL: Number(process.env.MAX_EVENTS_PER_CALL || 3),
+    MAX_EVENTS_PER_CALL: Number(process.env.MAX_EVENTS_PER_CALL || 10),
 
     ENABLE_NFL_H2H: BOOL(process.env.ENABLE_NFL_H2H, true),
-    ENABLE_NFL_H1:  BOOL(process.env.ENABLE_NFL_H1, false),
+    ENABLE_NFL_H1:  BOOL(process.env.ENABLE_NFL_H1, true),
     ENABLE_MLB_H2H: BOOL(process.env.ENABLE_MLB_H2H, true),
-    ENABLE_MLB_F5_H2H: BOOL(process.env.ENABLE_MLB_F5_H2H, false),
+    ENABLE_MLB_F5_H2H: BOOL(process.env.ENABLE_MLB_F5_H2H, true),
     ENABLE_NCAAF_H2H: BOOL(process.env.ENABLE_NCAAF_H2H, true),
     ENABLE_NCAAF_SPREADS: BOOL(process.env.ENABLE_NCAAF_SPREADS, false),
     ENABLE_NCAAF_TOTALS: BOOL(process.env.ENABLE_NCAAF_TOTALS, false),
 
-    ODDS_API_ENABLED: BOOL(process.env.ODDS_API_ENABLED, true),
+    ODDS_API_ENABLED:      BOOL(process.env.ODDS_API_ENABLED, true),
     ODDS_API_KEY_present: !!process.env.ODDS_API_KEY,
-    ODDS_API_REGION: process.env.ODDS_API_REGION || "",     // just echo
-    BOOKS_WHITELIST: process.env.BOOKS_WHITELIST || "",     // just echo
-    ALERT_BOOKS: process.env.ALERT_BOOKS || "",             // just echo
+    ODDS_API_REGION: process.env.ODDS_API_REGION || "",
+    BOOKS_WHITELIST: process.env.BOOKS_WHITELIST || "",
+    ALERT_BOOKS:     process.env.ALERT_BOOKS || "",
 
     LEAN_THRESHOLD: Number(process.env.LEAN_THRESHOLD || 0.01),
     STRONG_THRESHOLD: Number(process.env.STRONG_THRESHOLD || 0.02),
@@ -204,7 +221,7 @@ app.get("/health", guard(async (req, res) => {
 
     RETRY_429_MAX: Number(process.env.RETRY_429_MAX || 0),
     RATE_LIMIT_MS: Number(process.env.RATE_LIMIT_MS || 1200),
-    CACHE_TTL_SECONDS: Number(process.env.CACHE_TTL_SECONDS || 30),
+    CACHE_TTL_SECONDS: Number(process.env.CACHE_TTL_SECONDS || 60),
 
     TELEGRAM_CHAT_ID: String(process.env.TELEGRAM_CHAT_ID || ""),
     SCAN_KEY_present: !!process.env.SCAN_KEY,
@@ -213,12 +230,12 @@ app.get("/health", guard(async (req, res) => {
   res.json({ ok: true, env, ts: new Date().toISOString() });
 }));
 
-// Provider sanity (cheap)
-app.get("/diag/provider", guard(async (req, res) => {
+// Provider sanity (cheap echo)
+app.get("/diag/provider", guard(async (_req, res) => {
   const enabled = BOOL(process.env.ODDS_API_ENABLED, true);
   const key = process.env.ODDS_API_KEY;
   if (!enabled) return res.json({ ok: true, enabled, note: "provider disabled" });
-  if (!key)     return res.status(400).json({ ok: false, error: "no_api_key" });
+  if (!key) return res.status(400).json({ ok: false, error: "no_api_key" });
 
   const url = `https://api.the-odds-api.com/v4/sports/?apiKey=${encodeURIComponent(key)}`;
   const r = await fetch(url);
@@ -235,7 +252,8 @@ app.get("/api/diag/scan/:sport", gateScan, guard(async (req, res) => {
   if (!Array.isArray(raw)) return res.status(400).json({ ok: false, error: "unsupported_sport" });
 
   res.json({
-    ok: true, sport, limit,
+    ok: true,
+    sport, limit,
     pulled: raw.length,
     events: raw.map(g => ({
       gameId: g.id,
@@ -248,15 +266,15 @@ app.get("/api/diag/scan/:sport", gateScan, guard(async (req, res) => {
   });
 }));
 
-// Telegram test
+// Telegram test endpoint
 app.get("/api/telegram/test", guard(async (req, res) => {
-  const force = req.query.force === "1";
-  const text = req.query.text || "Hello from Odds Backend";
-  const r = await sendTelegram(String(text), { force });
+  const force = req.query.force === "1"; // ignore AUTO_TELEGRAM if forced
+  const text = String(req.query.text || "Hello from Odds Backend");
+  const r = await sendTelegram(text, { force });
   res.json(r);
 }));
 
-// Synthetic alert (zero provider credits)
+// Synthetic alert (no provider credits)
 app.get("/api/scan/mock", guard(async (req, res) => {
   const telegram = req.query.telegram === "true";
   const force = req.query.force === "1";
@@ -274,15 +292,16 @@ app.get("/api/scan/mock", guard(async (req, res) => {
       start_time_utc: new Date(Date.now() + 60 * 60 * 1000).toISOString()
     },
     sharp_side: { side: "home", team: "Mockers", confidence: "strong" },
-    lines: { sharp_entry: -105, current_consensus: -105, direction: "flat", book: "Consensus" },
+    lines: { sharp_entry: -105, current_consensus: -105, direction: "flat", book: "pinnacle" },
+    metrics: { ev: 1.25, kelly: 0.35 },
     score: 3,
     signals: [
       { key: "split_gap", label: "Handle > Tickets by 20%", weight: 2 },
       { key: "hold", label: "Hold 2%", weight: 1 }
     ],
     render: {
-      title: "GoSignals Sharp Alert",
-      emoji: "📊",
+      title: "SHARP ALERT – NFL Testers @ Mockers",
+      emoji: "🔁",
       strength: "🟢 Strong",
       tags: ["SPLITS"]
     },
@@ -290,10 +309,10 @@ app.get("/api/scan/mock", guard(async (req, res) => {
   };
 
   let sent = 0;
-  if (telegram || BOOL(process.env.AUTO_TELEGRAM, false)) {
+  if (telegram) {
     const text = formatAlertForTelegram(alert);
-    const r = await sendTelegram(text, { force: telegram });
-    sent = r.ok ? 1 : 0;
+    const r = await sendTelegram(text, { force });
+    if (r.ok) sent = 1;
   }
 
   res.json({
@@ -315,46 +334,36 @@ app.get("/api/scan/:sport", gateScan, guard(async (req, res) => {
   const ip     = req.get("cf-connecting-ip") || req.get("x-forwarded-for") || req.ip || "-";
   const sport  = String(req.params.sport || "").toLowerCase();
 
-  // NEW: allow either the query flag OR AUTO_TELEGRAM env to trigger sends
-  const sendQueryFlag = req.query.telegram === "true";     // manual override per-request
+  // Send flag: on if query ?telegram=true OR AUTO_TELEGRAM=true
+  const sendQueryFlag = req.query.telegram === "true";
   const autoTelegram  = BOOL(process.env.AUTO_TELEGRAM, false);
-  const telegram      = sendQueryFlag || autoTelegram;     // final decision
+  const willSend      = sendQueryFlag || autoTelegram;
 
   const oddsOn = String(process.env.ODDS_API_ENABLED || "true").toLowerCase();
-
   console.log(
-    `[scan] sport=${sport} send=${telegram} origin=${origin} ip=${ip} ua="${ua}" odds_api_enabled=${oddsOn} qs=${JSON.stringify(req.query)}`
+    `[scan] sport=${sport} send=${willSend} origin=${origin} ip=${ip} ua="${ua}" odds_api_enabled=${oddsOn} qs=${JSON.stringify(req.query)}`
   );
 
-  const limit   = Number(req.query.limit  || process.env.MAX_EVENTS_PER_CALL || 3);
-  const offset  = Number(req.query.offset || 0);
-  const force   = req.query.force  === "1";
-  const bypass  = req.query.bypass === "1";
+  const limit  = Number(req.query.limit  || process.env.MAX_EVENTS_PER_CALL || 10);
+  const offset = Number(req.query.offset || 0);
+  const force  = req.query.force  === "1"; // force TG even if AUTO_TELEGRAM=false (handled in sendTelegram)
+  const bypass = req.query.bypass === "1";
 
   const plannedJobs = [];
   const jobs = [];
 
   if (sport === "nfl") {
-    if (BOOL(process.env.ENABLE_NFL_H2H, true)) {
-      plannedJobs.push("NFL H2H");
-      jobs.push(getNFLH2HNormalized);
-    }
+    if (BOOL(process.env.ENABLE_NFL_H2H, true)) { plannedJobs.push("NFL H2H"); jobs.push(getNFLH2HNormalized); }
   } else if (sport === "mlb") {
-    if (BOOL(process.env.ENABLE_MLB_H2H, true)) {
-      plannedJobs.push("MLB H2H");
-      jobs.push(getMLBH2HNormalized);
-    }
+    if (BOOL(process.env.ENABLE_MLB_H2H, true)) { plannedJobs.push("MLB H2H"); jobs.push(getMLBH2HNormalized); }
     if (BOOL(process.env.ENABLE_MLB_F5_H2H, false)) {
       plannedJobs.push("MLB F5 H2H");
-      // add F5 fetcher here if/when present
+      // if you later implement: jobs.push(getMLBF5H2HNormalized);
     }
   } else if (sport === "ncaaf") {
-    if (BOOL(process.env.ENABLE_NCAAF_H2H, true)) {
-      plannedJobs.push("NCAAF H2H");
-      jobs.push(getNCAAFH2HNormalized);
-    }
+    if (BOOL(process.env.ENABLE_NCAAF_H2H, true)) { plannedJobs.push("NCAAF H2H"); jobs.push(getNCAAFH2HNormalized); }
   } else {
-    return res.status(400).json({ error: "unsupported_sport", sport });
+    return res.status(400).json({ ok: false, error: "unsupported_sport", sport });
   }
 
   if (!jobs.length) {
@@ -365,7 +374,7 @@ app.get("/api/scan/:sport", gateScan, guard(async (req, res) => {
     });
   }
 
-  // fetch snapshots (ask for offset+limit then slice)
+  // Fetch snapshots (ask for offset+limit then slice)
   const snapshots = [];
   for (const job of jobs) {
     const take = Math.max(0, (offset || 0) + (limit || 0));
@@ -396,11 +405,13 @@ app.get("/api/scan/:sport", gateScan, guard(async (req, res) => {
     };
 
     const a = analyzeMarket(normalized, { bypassDedupe: bypass });
-    if (a) { analyzed += 1; alerts.push(a); }
+    if (a) {
+      analyzed += 1;
+      alerts.push(a);
+    }
   }
 
-  // send to Telegram if enabled by query OR env
-  if (telegram && alerts.length) {
+  if (willSend && alerts.length) {
     for (const a of alerts) {
       const text = formatAlertForTelegram(a);
       const r = await sendTelegram(text, { force });
@@ -414,58 +425,7 @@ app.get("/api/scan/:sport", gateScan, guard(async (req, res) => {
   });
 }));
 
-
-  // fetch snapshots (ask for offset+limit then slice)
-  const snapshots = [];
-  for (const job of jobs) {
-    const take = Math.max(0, (offset || 0) + (limit || 0));
-    const got = await job({ limit: take || limit || 1 });
-    if (Array.isArray(got) && got.length) {
-      const sliced = offset > 0 ? got.slice(offset, offset + limit) : got.slice(0, limit);
-      snapshots.push(...sliced);
-    }
-  }
-
-  const pulled = snapshots.length;
-  const alerts = [];
-  let analyzed = 0;
-  let sent_to_telegram = 0;
-
-  for (const snap of snapshots) {
-    const normalized = {
-      id: snap.id || snap.gameId || undefined,
-      gameId: snap.id || snap.gameId || undefined,
-      sport: snap.sport || sport,
-      market: snap.market || (sport.toUpperCase() + " H2H"),
-      home: snap?.game?.home || snap.home,
-      away: snap?.game?.away || snap.away,
-      commence_time: snap?.game?.start_time_utc || snap.start_time_utc || snap.commence_time || null,
-      game: snap.game || { away: snap.away, home: snap.home, start_time_utc: snap.commence_time },
-      offers: snap.offers || [],
-      source_meta: snap.source_meta || {}
-    };
-
-    const a = analyzeMarket(normalized, { bypassDedupe: bypass });
-    if (a) { analyzed += 1; alerts.push(a); }
-  }
-
-  // Send if AUTO_TELEGRAM=true OR explicit ?telegram=true
-  const shouldSend = BOOL(process.env.AUTO_TELEGRAM, false) || sendQueryFlag;
-  if (shouldSend && alerts.length) {
-    for (const a of alerts) {
-      const text = formatAlertForTelegram(a);
-      const r = await sendTelegram(text, { force: sendQueryFlag });
-      if (r.ok) sent_to_telegram += 1;
-    }
-  }
-
-  res.json({
-    sport, limit, pulled, analyzed, sent_to_telegram,
-    timestamp_et: nowET(), planned_jobs: plannedJobs, alerts
-  });
-}));
-
-// Debug endpoints — gated
+// Debug: raw snapshot for a sport — gated
 app.get("/api/debug/snapshot/:sport", gateScan, guard(async (req, res) => {
   const sport = String(req.params.sport || "").toLowerCase();
   const limit = Number(req.query.limit || 1);
@@ -482,6 +442,7 @@ app.get("/api/debug/snapshot/:sport", gateScan, guard(async (req, res) => {
   res.json({ ok: !!snap, sport, limit, has: !!snap, keys: snap ? Object.keys(snap) : [], snapshot: snap || null });
 }));
 
+// Debug: run analyzer on a single normalized item — gated
 app.get("/api/debug/analyze/:sport", gateScan, guard(async (req, res) => {
   const sport = String(req.params.sport || "").toLowerCase();
   const limit = Number(req.query.limit || 1);
@@ -515,6 +476,10 @@ app.get("/api/debug/analyze/:sport", gateScan, guard(async (req, res) => {
   });
 }));
 
-app.get("/", (req, res) => res.json({ ok: true, name: "odds-backend", ts: new Date().toISOString() }));
+// Root
+app.get("/", (_req, res) => res.json({ ok: true, name: "odds-backend", ts: new Date().toISOString() }));
 
-app.listen(PORT, () => { console.log(`odds-backend listening on :${PORT}`); });
+// Start server
+app.listen(PORT, () => {
+  console.log(`odds-backend listening on :${PORT}`);
+});

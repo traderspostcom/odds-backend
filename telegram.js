@@ -1,74 +1,91 @@
-// --- helpers -------------------------------------------------
-function toET(isoOrMs) {
+// src/telegram.js
+import fetch from "node-fetch";
+
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+/* -------------------- Send Message (HTML mode) -------------------- */
+export async function sendTelegramMessage(message) {
   try {
-    const dt = new Date(isoOrMs);
-    return dt.toLocaleTimeString("en-US", {
-      hour: "numeric",
-      minute: "2-digit",
-      timeZone: "America/New_York",
+    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: message,
+        parse_mode: "HTML",
+        disable_web_page_preview: true
+      })
     });
-  } catch {
-    return "TBD";
+
+    if (!res.ok) {
+      console.error("❌ Telegram send failed:", await res.text());
+    } else {
+      console.log("📨 Telegram alert sent!");
+    }
+  } catch (err) {
+    console.error("❌ Telegram send error:", err);
   }
 }
 
+/* -------------------- Market Key Mapper -------------------- */
 function mapMarketKey(market) {
-  const norm = String(market).toLowerCase().replace(/[_\-\s]/g, "");
-  if (norm === "h2h" || norm === "h2h1st5innings") return "Moneyline (ML)";
-  if (norm === "spreads" || norm === "spreads1st5innings") return "Spread (SP)";
-  if (norm === "totals" || norm === "totals1st5innings") return "Total (TOT)";
-  if (norm === "teamtotals" || norm === "teamtotals1st5innings") return "Team Total (TT)";
-  return market.toUpperCase();
+  const norm = (market || "").toLowerCase().replace(/[_\-\s]/g, "");
+  if (norm === "h2h" || norm === "h2h1st5innings") return "ML";
+  if (norm === "totals" || norm === "totals1st5innings") return "TOT";
+  if (norm === "spreads" || norm === "spreads1st5innings") return "SP";
+  if (norm === "teamtotals" || norm === "teamtotals1st5innings") return "TT";
+  return (market || "").toUpperCase();
 }
 
-function fmtPrice(p) {
-  if (p == null) return "";
-  const n = Number(p);
-  return Number.isFinite(n) && n > 0 ? `+${n}` : String(p);
-}
-
-function strongBadge(sharpLabel) {
-  if (!sharpLabel) return "";
-  if (/strong/i.test(sharpLabel)) return " ⭐ *Strong*";
-  if (/lean/i.test(sharpLabel))   return " 🟢 *Lean*";
-  return ` (${sharpLabel})`;
-}
-
-// --- pretty formatter ---------------------------------------
+/* -------------------- Pretty Card-Style Formatter -------------------- */
 export function formatSharpBatch(games) {
-  const divider = "────────────────────────";
+  return games.map((g) => {
+    const market = mapMarketKey(g.market);
+    const gameTimeISO = g.time || g.commence_time || null;
 
-  return games.map((g, i) => {
-    const when = toET(g.time || g.commence_time);
-    const marketLabel = mapMarketKey(g.market);
-    const holdText = typeof g.hold === "number" ? `\n\n💰 Hold: ${(g.hold * 100).toFixed(2)}%` : "";
-    const badge = strongBadge(g.sharpLabel);
-
-    // build “best lines” block in a consistent order
-    const lines = [];
-    if (g.best) {
-      if (g.best.home)
-        lines.push(`🏠 ${g.home}: *${g.best.home.book}* (${fmtPrice(g.best.home.price)})`);
-      if (g.best.away)
-        lines.push(`🛫 ${g.away}: *${g.best.away.book}* (${fmtPrice(g.best.away.price)})`);
-      if (g.best.FAV)
-        lines.push(`⭐ Fav ${g.best.FAV.point ?? ""}: *${g.best.FAV.book}* (${fmtPrice(g.best.FAV.price)})`);
-      if (g.best.DOG)
-        lines.push(`🐶 Dog ${g.best.DOG.point ?? ""}: *${g.best.DOG.book}* (${fmtPrice(g.best.DOG.price)})`);
-      if (g.best.O)
-        lines.push(`⬆️ Over ${g.best.O.point ?? ""}: *${g.best.O.book}* (${fmtPrice(g.best.O.price)})`);
-      if (g.best.U)
-        lines.push(`⬇️ Under ${g.best.U.point ?? ""}: *${g.best.U.book}* (${fmtPrice(g.best.U.price)})`);
+    // format time in ET
+    let timeEt = "TBD";
+    if (gameTimeISO) {
+      try {
+        const dt = new Date(gameTimeISO);
+        timeEt = dt.toLocaleTimeString("en-US", {
+          hour: "numeric",
+          minute: "2-digit",
+          timeZone: "America/New_York"
+        });
+      } catch { /* noop */ }
     }
 
-    let msg = "";
-    if (i > 0) msg += `\n${divider}\n`;                 // visual separator between alerts
-    msg += `📊 *GoSignals Sharp Alert!*${badge}\n\n`;   // title
-    msg += `🕘 ${when}\n`;                              // time ET
-    msg += `⚔️ ${g.away} @ ${g.home}\n\n`;             // matchup
-    msg += `🎯 Market: ${marketLabel}\n\n`;             // market label
-    if (lines.length) msg += lines.join("\n");          // best lines
-    msg += holdText;                                    // hold % if present
-    return msg.trim();
+    // optional “(Lean/Strong)” if provided upstream
+    const sharp = g.sharpLabel ? ` (${g.sharpLabel})` : "";
+
+    // build best-price lines
+    const lines = [];
+    if (g.best?.home) lines.push(`🏠 <b>${g.home}</b>: <b>${g.best.home.book}</b> (${g.best.home.price})`);
+    if (g.best?.away) lines.push(`🛫 <b>${g.away}</b>: <b>${g.best.away.book}</b> (${g.best.away.price})`);
+    if (g.best?.FAV)  lines.push(`⭐ Fav ${g.best.FAV.point ?? ""}: <b>${g.best.FAV.book}</b> (${g.best.FAV.price})`);
+    if (g.best?.DOG)  lines.push(`🐶 Dog ${g.best.DOG.point ?? ""}: <b>${g.best.DOG.book}</b> (${g.best.DOG.price})`);
+    if (g.best?.O)    lines.push(`⬆️ Over ${g.best.O.point ?? ""}: <b>${g.best.O.book}</b> (${g.best.O.price})`);
+    if (g.best?.U)    lines.push(`⬇️ Under ${g.best.U.point ?? ""}: <b>${g.best.U.book}</b> (${g.best.U.price})`);
+
+    const hold = (typeof g.hold === "number")
+      ? `\n💰 Hold: <b>${(g.hold * 100).toFixed(2)}%</b>`
+      : "";
+
+    const th = (typeof g.tickets === "number" && typeof g.handle === "number")
+      ? `\n📈 Tickets: ${g.tickets}% | Handle: ${g.handle}%`
+      : "";
+
+    const header =
+      `📊 <b>GoSignals Sharp Alert${sharp}!</b>\n\n` +
+      `🕘 ${timeEt}\n` +
+      `⚔️ ${g.away} @ ${g.home}\n\n` +
+      `🎯 Market: <b>${market}</b>\n\n`;
+
+    const body = lines.length ? lines.join("\n") + hold + th : "No priced books available.";
+
+    return header + body;
   });
 }

@@ -3,28 +3,18 @@
 // Endpoints: /run (dry), /run-tg (force TG), /ping (health).
 // Cron runs only 07:00–23:00 ET. Requires SCAN_KEY secret to match Render SCAN_KEY.
 
-process.on("unhandledRejection", (err) => {
-  console.error("unhandledRejection", String(err?.stack || err));
-});
-process.on("uncaughtException", (err) => {
-  console.error("uncaughtException", String(err?.stack || err));
-});
-console.log("[boot] starting odds-backend", {
-  node: process.version,
-  cwd: process.cwd(),
-  port: process.env.PORT || 3000,
-});
-
 const BACKEND = "https://odds-backend-oo4k.onrender.com";
 
 /* ---------------------------- small helpers ---------------------------- */
-function json(obj, status = 200) {
-  return new Response(JSON.stringify(obj, null, 2), {
+const json = (obj, status = 200) =>
+  new Response(JSON.stringify(obj, null, 2), {
     status,
-    headers: { "content-type": "application/json" }
+    headers: { "content-type": "application/json" },
   });
-}
-function safeJSON(txt) { try { return JSON.parse(txt); } catch { return txt; } }
+
+const safeJSON = (txt) => {
+  try { return JSON.parse(txt); } catch { return txt; }
+};
 
 /** Is New York time within 07:00 → 23:00 (inclusive of exactly 23:00)? */
 function isETOpen() {
@@ -35,14 +25,14 @@ function isETOpen() {
     hour: "2-digit",
     minute: "2-digit",
   }).formatToParts(now);
-  const hh = Number(parts.find(p => p.type === "hour").value);
-  const mm = Number(parts.find(p => p.type === "minute").value);
-  if (hh < 7) return false;              // before 07:00 -> closed
-  if (hh < 23) return true;              // 07:00..22:59 -> open
-  return mm === 0;                       // exactly 23:00 -> open, 23:01+ -> closed
+  const hh = Number(parts.find((p) => p.type === "hour").value);
+  const mm = Number(parts.find((p) => p.type === "minute").value);
+  if (hh < 7) return false;  // before 07:00 -> closed
+  if (hh < 23) return true;  // 07:00..22:59 -> open
+  return mm === 0;           // exactly 23:00 -> open, 23:01+ -> closed
 }
 
-/** fetch with timeout that works on all CF runtimes */
+/** fetch with timeout that works on Workers */
 async function fetchWithTimeout(url, init = {}, ms = 9000) {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort("timeout"), ms);
@@ -65,7 +55,7 @@ async function scanOnce(sport, { offset = 0, send = false } = {}, env) {
   const res = await fetchWithTimeout(url, {
     headers: {
       "X-Scan-Origin": "cf-cron",
-      "X-Scan-Key": env.SCAN_KEY,       // must equal Render env SCAN_KEY
+      "X-Scan-Key": env.SCAN_KEY, // must equal Render env SCAN_KEY
       "User-Agent": "cf-cron/1.0",
     },
   }, 9000);
@@ -90,9 +80,9 @@ async function fetchHandler(request, env) {
   }
 
   if (path === "/run" || path === "/run-tg") {
-    const send = (path === "/run-tg");
+    const send = path === "/run-tg";
     const sports = (url.searchParams.get("sports") || "mlb")
-      .split(",").map(s => s.trim()).filter(Boolean);
+      .split(",").map((s) => s.trim()).filter(Boolean);
     const offset = Number(url.searchParams.get("offset") || "0") || 0;
 
     const results = {};
@@ -113,10 +103,10 @@ async function fetchHandler(request, env) {
 export async function scheduled(event, env, ctx) {
   if (!isETOpen()) { console.log("cron_skip_outside_ET_window"); return; }
 
-  const sportsCsv = env.SCAN_SPORTS || "mlb";   // e.g., "mlb,nfl,ncaaf"
+  const sportsCsv = env.SCAN_SPORTS || "mlb"; // e.g., "mlb,nfl,ncaaf"
   const offset = Number(env.SCAN_OFFSET || "0") || 0;
 
-  const sports = sportsCsv.split(",").map(s => s.trim()).filter(Boolean);
+  const sports = sportsCsv.split(",").map((s) => s.trim()).filter(Boolean);
   for (const s of sports) {
     try {
       const r = await scanOnce(s, { offset, send: false }, env);
@@ -129,7 +119,4 @@ export async function scheduled(event, env, ctx) {
 }
 
 /* --------------------------- default export ---------------------------- */
-export default {
-  fetch: fetchHandler,
-  scheduled, // present on default for runtimes that expect it here
-};
+export default { fetch: fetchHandler, scheduled };

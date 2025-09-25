@@ -1,13 +1,5 @@
-// src/index.js (ESM) — Odds Backend on Render
-// Routes:
-// - GET /health
-// - GET /diag/provider
-// - GET /api/diag/scan/:sport?limit=N                     (cheap diag)
-// - GET /api/telegram/test?text=...&force=1               (free TG ping)
-// - GET /api/scan/mock?telegram=bool&force=1&bypass=1     (free synthetic alert)
-// - GET /api/scan/:sport?limit=N&offset=K&telegram=bool&force=1&bypass=1
-// - GET /api/debug/snapshot/:sport?limit=N&offset=K       (cheap snapshot)
-// - GET /api/debug/analyze/:sport?limit=N&offset=K&bypass=1
+// src/index.js (ESM)
+// Odds Backend – Render
 
 import express from "express";
 import cors from "cors";
@@ -16,27 +8,18 @@ import {
   getNFLH2HNormalized,
   getMLBH2HNormalized,
   getNCAAFH2HNormalized,
-  diagListBooksForSport,
+  diagListBooksForSport
 } from "./fetchers.js";
 
 import { analyzeMarket } from "../sharpEngine.js";
 
-// ----------------------------- process guards -----------------------------
-process.on("unhandledRejection", (err) => {
-  console.error("unhandledRejection", String(err?.stack || err));
-});
-process.on("uncaughtException", (err) => {
-  console.error("uncaughtException", String(err?.stack || err));
-});
-
-// ----------------------------- express app --------------------------------
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "256kb" }));
 
 const PORT = process.env.PORT || 3000;
 
-// ------------------------------- helpers ----------------------------------
+/* ------------------------------- helpers -------------------------------- */
 function BOOL(v, def = false) {
   if (v == null) return def;
   const s = String(v).trim().toLowerCase();
@@ -47,68 +30,50 @@ function BOOL(v, def = false) {
 function nowET(d = new Date()) {
   return d.toLocaleString("en-US", { timeZone: "America/New_York" });
 }
-function safeJson(s) {
-  try { return JSON.parse(s); } catch { return String(s); }
-}
-function mask(str, keep = 4) {
-  if (!str) return false;
-  const s = String(str);
-  return s.length <= keep ? s : `${s.slice(0, keep)}…(${s.length})`;
-}
+function safeJson(s) { try { return JSON.parse(s); } catch { return String(s); } }
+
 function guard(fn) {
   return async (req, res) => {
-    try {
-      await fn(req, res);
-    } catch (err) {
+    try { await fn(req, res); }
+    catch (err) {
       console.error("handler_error", {
         path: req.path,
         msg: String((err && err.message) || err),
-        stack: err && err.stack,
+        stack: err && err.stack
       });
-      res.status(500).json({ ok: false, error: "internal_error", detail: String(err?.message || err) });
+      res.status(500).json({ ok: false, error: "internal_error" });
     }
   };
 }
 
-// ------------------------------ SCAN KEY gate -----------------------------
+// scan key gate (optional enable via env: SCAN_KEY set)
 function gateScan(req, res, next) {
   const required = process.env.SCAN_KEY;
-  if (!required) return next(); // disabled if no key is set
+  if (!required) return next();
   const provided = req.get("x-scan-key") || req.query.scan_key || "";
-  if (provided !== required) {
-    return res.status(401).json({ ok: false, error: "scan_key_required" });
-  }
+  if (provided !== required) return res.status(401).json({ ok: false, error: "scan_key_required" });
   next();
 }
 
-// ------------------------------- Telegram ---------------------------------
+/* -------------------------------- TG ------------------------------------ */
 async function sendTelegram(text, { force = false } = {}) {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const chatId = process.env.TELEGRAM_CHAT_ID;
   const auto = BOOL(process.env.AUTO_TELEGRAM, false);
 
-  if (!token || !chatId) {
-    return { ok: false, error: "telegram_not_configured" };
-  }
-  if (!auto && !force) {
-    return { ok: false, skipped: true, reason: "AUTO_TELEGRAM=false and force!=1" };
-  }
+  if (!token || !chatId) return { ok: false, error: "telegram_not_configured" };
+  if (!auto && !force)   return { ok: false, skipped: true, reason: "AUTO_TELEGRAM=false and force!=1" };
 
   const url = `https://api.telegram.org/bot${token}/sendMessage`;
   const body = { chat_id: chatId, text, disable_web_page_preview: true };
 
-  try {
-    const r = await fetch(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const j = await r.json().catch(() => ({}));
-    return { ok: r.ok && j.ok, status: r.status, body: j };
-  } catch (e) {
-    console.error("telegram_error", String(e?.stack || e));
-    return { ok: false, error: String(e) };
-  }
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const j = await r.json().catch(() => ({}));
+  return { ok: r.ok && j.ok, status: r.status, body: j };
 }
 
 function formatAlertForTelegram(a) {
@@ -119,7 +84,7 @@ function formatAlertForTelegram(a) {
   const line = a?.lines?.sharp_entry != null
     ? (a.lines.sharp_entry >= 0 ? `+${a.lines.sharp_entry}` : `${a.lines.sharp_entry}`)
     : "-";
-  const tag = Array.isArray(a?.render?.tags) ? a.render.tags.join(",") : (a?.source || "").toUpperCase();
+  const tag  = Array.isArray(a?.render?.tags) ? a.render.tags.join(",") : (a?.source || "").toUpperCase();
 
   return [
     `${a?.render?.emoji || "🚨"} ${a?.render?.title || "ALERT"}`,
@@ -129,9 +94,9 @@ function formatAlertForTelegram(a) {
   ].join("\n");
 }
 
-// -------------------------------- Routes ----------------------------------
+/* -------------------------------- routes -------------------------------- */
 
-// Health (FREE)
+// Health
 app.get("/health", guard(async (req, res) => {
   const env = {
     HARD_KILL: BOOL(process.env.HARD_KILL, false),
@@ -141,10 +106,10 @@ app.get("/health", guard(async (req, res) => {
 
     MANUAL_MAX_JOBS: Number(process.env.MANUAL_MAX_JOBS || 1),
     MAX_JOBS_PER_SPORT: Number(process.env.MAX_JOBS_PER_SPORT || 1),
-    MAX_EVENTS_PER_CALL: Number(process.env.MAX_EVENTS_PER_CALL || 1),
+    MAX_EVENTS_PER_CALL: Number(process.env.MAX_EVENTS_PER_CALL || 3),
 
     ENABLE_NFL_H2H: BOOL(process.env.ENABLE_NFL_H2H, true),
-    ENABLE_NFL_H1: BOOL(process.env.ENABLE_NFL_H1, false),
+    ENABLE_NFL_H1:  BOOL(process.env.ENABLE_NFL_H1, false),
     ENABLE_MLB_H2H: BOOL(process.env.ENABLE_MLB_H2H, true),
     ENABLE_MLB_F5_H2H: BOOL(process.env.ENABLE_MLB_F5_H2H, false),
     ENABLE_NCAAF_H2H: BOOL(process.env.ENABLE_NCAAF_H2H, true),
@@ -153,12 +118,12 @@ app.get("/health", guard(async (req, res) => {
 
     ODDS_API_ENABLED: BOOL(process.env.ODDS_API_ENABLED, true),
     ODDS_API_KEY_present: !!process.env.ODDS_API_KEY,
-    ODDS_API_REGION: process.env.ODDS_API_REGION || "eu",
-    BOOKS_WHITELIST: process.env.BOOKS_WHITELIST || "",
-    ALERT_BOOKS: process.env.ALERT_BOOKS || "",
+    ODDS_API_REGION: process.env.ODDS_API_REGION || "",     // just echo
+    BOOKS_WHITELIST: process.env.BOOKS_WHITELIST || "",     // just echo
+    ALERT_BOOKS: process.env.ALERT_BOOKS || "",             // just echo
 
     LEAN_THRESHOLD: Number(process.env.LEAN_THRESHOLD || 0.01),
-    STRONG_THRESHOLD: Number(process.env.STRONG_THRESHOLD || 0.035),
+    STRONG_THRESHOLD: Number(process.env.STRONG_THRESHOLD || 0.02),
     OUTLIER_DOG_CENTS_LEAN: Number(process.env.OUTLIER_DOG_CENTS_LEAN || 10),
     OUTLIER_DOG_CENTS_STRONG: Number(process.env.OUTLIER_DOG_CENTS_STRONG || 18),
     OUTLIER_FAV_CENTS_LEAN: Number(process.env.OUTLIER_FAV_CENTS_LEAN || 7),
@@ -166,20 +131,21 @@ app.get("/health", guard(async (req, res) => {
 
     RETRY_429_MAX: Number(process.env.RETRY_429_MAX || 0),
     RATE_LIMIT_MS: Number(process.env.RATE_LIMIT_MS || 1200),
-    CACHE_TTL_SECONDS: Number(process.env.CACHE_TTL_SECONDS || 90),
+    CACHE_TTL_SECONDS: Number(process.env.CACHE_TTL_SECONDS || 30),
 
     TELEGRAM_CHAT_ID: String(process.env.TELEGRAM_CHAT_ID || ""),
     SCAN_KEY_present: !!process.env.SCAN_KEY,
   };
+
   res.json({ ok: true, env, ts: new Date().toISOString() });
 }));
 
-// Provider probe (CHEAP)
+// Provider sanity (cheap)
 app.get("/diag/provider", guard(async (req, res) => {
   const enabled = BOOL(process.env.ODDS_API_ENABLED, true);
   const key = process.env.ODDS_API_KEY;
   if (!enabled) return res.json({ ok: true, enabled, note: "provider disabled" });
-  if (!key) return res.status(400).json({ ok: false, error: "no_api_key" });
+  if (!key)     return res.status(400).json({ ok: false, error: "no_api_key" });
 
   const url = `https://api.the-odds-api.com/v4/sports/?apiKey=${encodeURIComponent(key)}`;
   const r = await fetch(url);
@@ -187,17 +153,16 @@ app.get("/diag/provider", guard(async (req, res) => {
   res.json({ ok: r.ok, status: r.status, body: safeJson(txt) });
 }));
 
-// Books per game (CHEAP) — gated
+// Books per game (diagnostic) — gated
 app.get("/api/diag/scan/:sport", gateScan, guard(async (req, res) => {
   const sport = String(req.params.sport || "").toLowerCase();
   const limit = Number(req.query.limit || 3);
+
   const raw = await diagListBooksForSport(sport, { limit });
   if (!Array.isArray(raw)) return res.status(400).json({ ok: false, error: "unsupported_sport" });
 
   res.json({
-    ok: true,
-    sport,
-    limit,
+    ok: true, sport, limit,
     pulled: raw.length,
     events: raw.map(g => ({
       gameId: g.id,
@@ -205,12 +170,12 @@ app.get("/api/diag/scan/:sport", gateScan, guard(async (req, res) => {
       home: g.home,
       commence_time: g.commence_time,
       offers_count: Array.isArray(g.books) ? g.books.length : 0,
-      books: g.books || [],
-    })),
+      books: g.books || []
+    }))
   });
 }));
 
-// Telegram test (FREE)
+// Telegram test
 app.get("/api/telegram/test", guard(async (req, res) => {
   const force = req.query.force === "1";
   const text = req.query.text || "Hello from Odds Backend";
@@ -218,8 +183,8 @@ app.get("/api/telegram/test", guard(async (req, res) => {
   res.json(r);
 }));
 
-// Synthetic alert (FREE)
-app.get("/api/scan/mock", gateScan, guard(async (req, res) => {
+// Synthetic alert (zero provider credits)
+app.get("/api/scan/mock", guard(async (req, res) => {
   const telegram = req.query.telegram === "true";
   const force = req.query.force === "1";
   const bypass = req.query.bypass === "1";
@@ -233,22 +198,22 @@ app.get("/api/scan/mock", gateScan, guard(async (req, res) => {
     game: {
       away: "Testers",
       home: "Mockers",
-      start_time_utc: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      start_time_utc: new Date(Date.now() + 60 * 60 * 1000).toISOString()
     },
     sharp_side: { side: "home", team: "Mockers", confidence: "strong" },
     lines: { sharp_entry: -105, current_consensus: -105, direction: "flat", book: null },
     score: 3,
     signals: [
       { key: "split_gap", label: "Handle > Tickets by 20%", weight: 2 },
-      { key: "hold", label: "Hold 2%", weight: 1 },
+      { key: "hold", label: "Hold 2%", weight: 1 }
     ],
     render: {
       title: "SHARP ALERT – NFL Testers @ Mockers",
       emoji: "🔁",
       strength: "🟢 Strong",
-      tags: ["SPLITS"],
+      tags: ["SPLITS"]
     },
-    meta: { generated_at: new Date().toISOString() },
+    meta: { generated_at: new Date().toISOString() }
   };
 
   let sent = 0;
@@ -266,11 +231,11 @@ app.get("/api/scan/mock", gateScan, guard(async (req, res) => {
     sent_to_telegram: sent,
     timestamp_et: nowET(),
     planned_jobs: ["NFL H2H (mock)"],
-    alerts: [alert],
+    alerts: [alert]
   });
 }));
 
-// Main scan (COSTS when ODDS_API_ENABLED=true) — gated
+// Main scan — gated
 app.get("/api/scan/:sport", gateScan, guard(async (req, res) => {
   const origin = req.get("x-scan-origin") || req.query.from || "unknown";
   const ua     = req.get("user-agent") || "-";
@@ -279,11 +244,10 @@ app.get("/api/scan/:sport", gateScan, guard(async (req, res) => {
   const send   = req.query.telegram === "true";
   const oddsOn = String(process.env.ODDS_API_ENABLED || "true").toLowerCase();
   console.log(
-    "[scan]",
-    JSON.stringify({ sport, send, origin, ip, ua, odds_api_enabled: oddsOn, qs: req.query })
+    `[scan] sport=${sport} send=${send} origin=${origin} ip=${ip} ua="${ua}" odds_api_enabled=${oddsOn} qs=${JSON.stringify(req.query)}`
   );
 
-  const limit  = Number(req.query.limit  || process.env.MAX_EVENTS_PER_CALL || 1);
+  const limit  = Number(req.query.limit  || process.env.MAX_EVENTS_PER_CALL || 3);
   const offset = Number(req.query.offset || 0);
   const telegram = send;
   const force  = req.query.force  === "1";
@@ -306,21 +270,18 @@ app.get("/api/scan/:sport", gateScan, guard(async (req, res) => {
     return res.json({
       sport, limit, pulled: 0, analyzed: 0, sent_to_telegram: 0,
       timestamp_et: nowET(), planned_jobs: plannedJobs, alerts: [],
-      note: "No jobs enabled via env for this sport.",
+      note: "No jobs enabled via env for this sport."
     });
   }
 
+  // fetch snapshots (ask for offset+limit then slice)
   const snapshots = [];
   for (const job of jobs) {
     const take = Math.max(0, (offset || 0) + (limit || 0));
-    try {
-      const got = await job({ limit: take || limit || 1, offset: 0 });
-      if (Array.isArray(got) && got.length) {
-        const sliced = offset > 0 ? got.slice(offset, offset + limit) : got.slice(0, limit);
-        snapshots.push(...sliced);
-      }
-    } catch (e) {
-      console.error("snapshot_fetch_error", sport, String(e?.stack || e));
+    const got = await job({ limit: take || limit || 1 });
+    if (Array.isArray(got) && got.length) {
+      const sliced = offset > 0 ? got.slice(offset, offset + limit) : got.slice(0, limit);
+      snapshots.push(...sliced);
     }
   }
 
@@ -330,47 +291,38 @@ app.get("/api/scan/:sport", gateScan, guard(async (req, res) => {
   let sent_to_telegram = 0;
 
   for (const snap of snapshots) {
-    try {
-      const normalized = {
-        id: snap.id || snap.gameId || undefined,
-        gameId: snap.id || snap.gameId || undefined,
-        sport: snap.sport || sport,
-        market: snap.market || (sport.toUpperCase() + " H2H"),
-        home: snap?.game?.home || snap.home,
-        away: snap?.game?.away || snap.away,
-        commence_time: snap?.game?.start_time_utc || snap.start_time_utc || snap.commence_time || null,
-        game: snap.game || { away: snap.away, home: snap.home, start_time_utc: snap.commence_time },
-        offers: snap.offers || [],
-        source_meta: snap.source_meta || {},
-      };
+    const normalized = {
+      id: snap.id || snap.gameId || undefined,
+      gameId: snap.id || snap.gameId || undefined,
+      sport: snap.sport || sport,
+      market: snap.market || (sport.toUpperCase() + " H2H"),
+      home: snap?.game?.home || snap.home,
+      away: snap?.game?.away || snap.away,
+      commence_time: snap?.game?.start_time_utc || snap.start_time_utc || snap.commence_time || null,
+      game: snap.game || { away: snap.away, home: snap.home, start_time_utc: snap.commence_time },
+      offers: snap.offers || [],
+      source_meta: snap.source_meta || {}
+    };
 
-      const a = analyzeMarket(normalized, { bypassDedupe: bypass });
-      if (a) { analyzed += 1; alerts.push(a); }
-    } catch (e) {
-      console.error("analyze_error", String(e?.stack || e));
-    }
+    const a = analyzeMarket(normalized, { bypassDedupe: bypass });
+    if (a) { analyzed += 1; alerts.push(a); }
   }
 
   if (telegram && alerts.length) {
     for (const a of alerts) {
-      try {
-        const text = formatAlertForTelegram(a);
-        const r = await sendTelegram(text, { force });
-        if (r.ok) sent_to_telegram += 1;
-        else console.warn("telegram_send_fail", r);
-      } catch (e) {
-        console.error("telegram_send_error", String(e?.stack || e));
-      }
+      const text = formatAlertForTelegram(a);
+      const r = await sendTelegram(text, { force });
+      if (r.ok) sent_to_telegram += 1;
     }
   }
 
   res.json({
     sport, limit, pulled, analyzed, sent_to_telegram,
-    timestamp_et: nowET(), planned_jobs: plannedJobs, alerts,
+    timestamp_et: nowET(), planned_jobs: plannedJobs, alerts
   });
 }));
 
-// Debug: one normalized snapshot (CHEAP) — gated
+// Debug endpoints — gated
 app.get("/api/debug/snapshot/:sport", gateScan, guard(async (req, res) => {
   const sport = String(req.params.sport || "").toLowerCase();
   const limit = Number(req.query.limit || 1);
@@ -384,13 +336,9 @@ app.get("/api/debug/snapshot/:sport", gateScan, guard(async (req, res) => {
 
   const sliced = offset > 0 ? list.slice(offset, offset + limit) : list.slice(0, limit);
   const snap = sliced[0] || null;
-  res.json({
-    ok: !!snap, sport, limit, has: !!snap,
-    keys: snap ? Object.keys(snap) : [], snapshot: snap || null,
-  });
+  res.json({ ok: !!snap, sport, limit, has: !!snap, keys: snap ? Object.keys(snap) : [], snapshot: snap || null });
 }));
 
-// Debug: run analyzer once (CHEAP except provider call) — gated
 app.get("/api/debug/analyze/:sport", gateScan, guard(async (req, res) => {
   const sport = String(req.params.sport || "").toLowerCase();
   const limit = Number(req.query.limit || 1);
@@ -415,27 +363,15 @@ app.get("/api/debug/analyze/:sport", gateScan, guard(async (req, res) => {
     if (forceMarket) normalized.market = forceMarket;
   }
 
-  let analysis = null;
-  if (normalized) {
-    try {
-      analysis = analyzeMarket(normalized, { bypassDedupe: bypass });
-    } catch (e) {
-      console.error("debug_analyze_error", String(e?.stack || e));
-    }
-  }
+  const analysis = normalized ? analyzeMarket(normalized, { bypassDedupe: bypass }) : null;
 
   res.json({
-    ok: true, sport, limit,
-    has_snapshot: !!normalized,
+    ok: true, sport, limit, has_snapshot: !!normalized,
     snapshot_keys: normalized ? Object.keys(normalized) : [],
-    analysis_null: !analysis, analysis: analysis || null,
+    analysis_null: !analysis, analysis: analysis || null
   });
 }));
 
-// Root ping (FREE)
 app.get("/", (req, res) => res.json({ ok: true, name: "odds-backend", ts: new Date().toISOString() }));
 
-// ------------------------------ start server ------------------------------
-app.listen(PORT, () => {
-  console.log(`odds-backend listening on :${PORT}`);
-});
+app.listen(PORT, () => { console.log(`odds-backend listening on :${PORT}`); });

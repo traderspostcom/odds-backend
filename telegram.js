@@ -1,123 +1,74 @@
-// src/telegram.js
-import fetch from "node-fetch";
-
-const TELEGRAM_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-
-/* -------------------- utils -------------------- */
-function esc(s) {
-  // HTML escape for Telegram parse_mode=HTML
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function toET(isoLike) {
-  if (!isoLike) return "TBD";
+// --- helpers -------------------------------------------------
+function toET(isoOrMs) {
   try {
-    const dt = new Date(isoLike);
+    const dt = new Date(isoOrMs);
     return dt.toLocaleTimeString("en-US", {
       hour: "numeric",
       minute: "2-digit",
       timeZone: "America/New_York",
     });
   } catch {
-    return String(isoLike);
+    return "TBD";
   }
 }
 
 function mapMarketKey(market) {
-  if (!market) return "—";
-  const norm = market.toLowerCase().replace(/[_\-\s]/g, "");
-  if (norm === "h2h" || norm === "h2h1st5innings") return "ML";
-  if (norm === "totals" || norm === "totals1st5innings") return "TOT";
-  if (norm === "spreads" || norm === "spreads1st5innings") return "SP";
-  if (norm === "teamtotals" || norm === "teamtotals1st5innings") return "TT";
+  const norm = String(market).toLowerCase().replace(/[_\-\s]/g, "");
+  if (norm === "h2h" || norm === "h2h1st5innings") return "Moneyline (ML)";
+  if (norm === "spreads" || norm === "spreads1st5innings") return "Spread (SP)";
+  if (norm === "totals" || norm === "totals1st5innings") return "Total (TOT)";
+  if (norm === "teamtotals" || norm === "teamtotals1st5innings") return "Team Total (TT)";
   return market.toUpperCase();
 }
 
-/* -------------------- sender -------------------- */
-export async function sendTelegramMessage(message) {
-  try {
-    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text: message,
-        parse_mode: "HTML",
-        disable_web_page_preview: true,
-      }),
-    });
-    if (!res.ok) {
-      console.error("❌ Telegram send failed:", await res.text());
-    } else {
-      console.log("📨 Telegram alert sent!");
-    }
-  } catch (err) {
-    console.error("❌ Telegram send error:", err);
-  }
+function fmtPrice(p) {
+  if (p == null) return "";
+  const n = Number(p);
+  return Number.isFinite(n) && n > 0 ? `+${n}` : String(p);
 }
 
-/* -------------------- formatter -------------------- */
+function strongBadge(sharpLabel) {
+  if (!sharpLabel) return "";
+  if (/strong/i.test(sharpLabel)) return " ⭐ *Strong*";
+  if (/lean/i.test(sharpLabel))   return " 🟢 *Lean*";
+  return ` (${sharpLabel})`;
+}
+
+// --- pretty formatter ---------------------------------------
 export function formatSharpBatch(games) {
-  return games.map((g) => {
-    const market = mapMarketKey(g.market);
-    const timeET = toET(g.time || g.commence_time);
-    const sharp   = g.sharpLabel ? ` (${esc(g.sharpLabel)})` : "";
+  const divider = "────────────────────────";
 
-    // Optional numbers that may exist in your objects
-    const edge  = (g.edge  != null) ? Number(g.edge).toFixed(2) : null;
-    const ev    = (g.ev    != null) ? Number(g.ev).toFixed(2)   : null;
-    const kelly = (g.kelly != null) ? Number(g.kelly).toFixed(2): null;
+  return games.map((g, i) => {
+    const when = toET(g.time || g.commence_time);
+    const marketLabel = mapMarketKey(g.market);
+    const holdText = typeof g.hold === "number" ? `\n\n💰 Hold: ${(g.hold * 100).toFixed(2)}%` : "";
+    const badge = strongBadge(g.sharpLabel);
 
-    const holdText = (g.hold != null)
-      ? `💰 Hold: <b>${(g.hold * 100).toFixed(2)}%</b>`
-      : "";
-
-    let lines = [];
-
-    // Headline
-    lines.push(`📊 <b>GoSignals Sharp Alert${sharp}!</b>`);
-    lines.push(`🕒 ${esc(timeET)}  •  🎯 Market: <b>${esc(market)}</b>`);
-    lines.push(`⚔️ ${esc(g.away || "Away")} @ ${esc(g.home || "Home")}`);
-
-    // Best lines block (all optional)
+    // build “best lines” block in a consistent order
+    const lines = [];
     if (g.best) {
-      let best = [];
-      if (g.best.home) best.push(`🏠 ${esc(g.home)}: <b>${esc(g.best.home.book)}</b> (${esc(g.best.home.price)})`);
-      if (g.best.away) best.push(`🛫 ${esc(g.away)}: <b>${esc(g.best.away.book)}</b> (${esc(g.best.away.price)})`);
-      if (g.best.O)    best.push(`⬆️ Over ${esc(g.best.O.point || "")}: <b>${esc(g.best.O.book)}</b> (${esc(g.best.O.price)})`);
-      if (g.best.U)    best.push(`⬇️ Under ${esc(g.best.U.point || "")}: <b>${esc(g.best.U.book)}</b> (${esc(g.best.U.price)})`);
-      if (g.best.FAV)  best.push(`⭐ Fav ${esc(g.best.FAV.point || "")}: <b>${esc(g.best.FAV.book)}</b> (${esc(g.best.FAV.price)})`);
-      if (g.best.DOG)  best.push(`🐶 Dog ${esc(g.best.DOG.point || "")}: <b>${esc(g.best.DOG.book)}</b> (${esc(g.best.DOG.price)})`);
-      if (best.length) {
-        lines.push("");
-        lines = lines.concat(best);
-      }
+      if (g.best.home)
+        lines.push(`🏠 ${g.home}: *${g.best.home.book}* (${fmtPrice(g.best.home.price)})`);
+      if (g.best.away)
+        lines.push(`🛫 ${g.away}: *${g.best.away.book}* (${fmtPrice(g.best.away.price)})`);
+      if (g.best.FAV)
+        lines.push(`⭐ Fav ${g.best.FAV.point ?? ""}: *${g.best.FAV.book}* (${fmtPrice(g.best.FAV.price)})`);
+      if (g.best.DOG)
+        lines.push(`🐶 Dog ${g.best.DOG.point ?? ""}: *${g.best.DOG.book}* (${fmtPrice(g.best.DOG.price)})`);
+      if (g.best.O)
+        lines.push(`⬆️ Over ${g.best.O.point ?? ""}: *${g.best.O.book}* (${fmtPrice(g.best.O.price)})`);
+      if (g.best.U)
+        lines.push(`⬇️ Under ${g.best.U.point ?? ""}: *${g.best.U.book}* (${fmtPrice(g.best.U.price)})`);
     }
 
-    // Edge/EV/Kelly (if available)
-    if (edge || ev || kelly) {
-      let parts = [];
-      if (edge)  parts.push(`Edge: <b>${edge}%</b>`);
-      if (ev)    parts.push(`EV: <b>${ev}</b>`);
-      if (kelly) parts.push(`Kelly: <b>${kelly}</b>`);
-      if (parts.length) lines.push("", `📈 ${parts.join("  •  ")}`);
-    }
-
-    // Public splits (if present)
-    if (typeof g.tickets === "number" || typeof g.handle === "number") {
-      const t = (typeof g.tickets === "number") ? `${g.tickets}%` : "—";
-      const h = (typeof g.handle  === "number") ? `${g.handle}%`  : "—";
-      lines.push(`👥 Tickets: <b>${t}</b>  •  Handle: <b>${h}</b>`);
-    }
-
-    // Hold
-    if (holdText) lines.push(holdText);
-
-    return lines.join("\n").trim();
+    let msg = "";
+    if (i > 0) msg += `\n${divider}\n`;                 // visual separator between alerts
+    msg += `📊 *GoSignals Sharp Alert!*${badge}\n\n`;   // title
+    msg += `🕘 ${when}\n`;                              // time ET
+    msg += `⚔️ ${g.away} @ ${g.home}\n\n`;             // matchup
+    msg += `🎯 Market: ${marketLabel}\n\n`;             // market label
+    if (lines.length) msg += lines.join("\n");          // best lines
+    msg += holdText;                                    // hold % if present
+    return msg.trim();
   });
 }

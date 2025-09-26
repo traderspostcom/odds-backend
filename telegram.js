@@ -1,96 +1,139 @@
-/* src/utils/stake.js — Bankroll staking helper for GoSignals (ESM) */
+// src/telegram.js — ESM, includes bankroll stake line, Play-to line, and plain "Away:" matchup
 
-function toNumber(x) {
-  if (x === null || x === undefined) return NaN;
-  const n = typeof x === "number" ? x : parseFloat(String(x));
-  return Number.isFinite(n) ? n : NaN;
+import fetch from "node-fetch";
+import { formatStakeLineForTelegram } from "./utils/stake.js";
+import { formatPlayToLineML } from "./utils/playto.js";
+
+const TELEGRAM_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+export async function sendTelegramMessage(text) {
+  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+    console.error("❌ Telegram not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)");
+    return;
+  }
+  const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text,
+        parse_mode: "Markdown",
+        disable_web_page_preview: true
+      })
+    });
+    if (!res.ok) {
+      console.error("❌ Telegram send failed:", await res.text());
+    } else {
+      console.log("📨 Telegram alert sent!");
+    }
+  } catch (err) {
+    console.error("❌ Telegram send error:", err);
+  }
 }
 
-export function americanToDecimal(american) {
-  const a = toNumber(american);
-  if (!Number.isFinite(a)) return NaN;
-  if (a >= 100) return 1 + a / 100;
-  if (a <= -100) return 1 + 100 / Math.abs(a);
+function mapMarketKey(market) {
+  const norm = String(market || "").toLowerCase().replace(/[_\-\s]/g, "");
+  switch (true) {
+    case norm === "h2h":                return "ML";
+    case norm === "h2h1st5innings":     return "ML (F5)";
+    case norm === "spreads":            return "SP";
+    case norm === "spreads1st5innings": return "SP (F5)";
+    case norm === "totals":             return "TOT";
+    case norm === "totals1st5innings":  return "TOT (F5)";
+    case norm === "teamtotals":         return "TT";
+    default:                            return (market || "").toUpperCase();
+  }
+}
+
+// helpers to infer fair probability for the picked side (best-effort, safe to fail)
+function num(x) { const n = Number(x); return Number.isFinite(n) ? n : NaN; }
+function inferPickedSide(g) {
+  const sideField = String(g?.side || g?.sharp_side?.side || "").toLowerCase();
+  if (sideField === "home" || sideField === "away") return sideField;
+  if (g?.best?.away && !g?.best?.home) return "away";
+  if (g?.best?.home && !g?.best?.away) return "home";
+  return null;
+}
+function inferFairProbForPick(g) {
+  const fh = num(g?.metrics?.fair_home ?? g?.fair_home);
+  const fa = num(g?.metrics?.fair_away ?? g?.fair_away);
+  const fp = num(g?.metrics?.fair_prob ?? g?.fair_prob);
+  const side = inferPickedSide(g);
+
+  if (side === "home") {
+    if (Number.isFinite(fh)) return fh;
+    if (Number.isFinite(fa)) return 1 - fa;
+  }
+  if (side === "away") {
+    if (Number.isFinite(fa)) return fa;
+    if (Number.isFinite(fh)) return 1 - fh;
+  }
+  if (Number.isFinite(fp)) return fp;
   return NaN;
 }
 
-// Kelly fraction k = (d*p - 1) / (d - 1), where d = decimal odds, p = fair prob
-export function kellyFromProbAndPrice(p, americanPrice) {
-  const pNum = toNumber(p);
-  const d = americanToDecimal(americanPrice);
-  if (!Number.isFinite(pNum) || !Number.isFinite(d) || d <= 1) return NaN;
-  const k = (d * pNum - 1) / (d - 1);
-  return k;
-}
+/**
+ * Formats an array of alert objects into Telegram-ready strings.
+ * Each element in the returned array is a full message block.
+ */
+export function formatSharpBatch(alerts) {
+  return (alerts || []).map(g => {
+    const market = mapMarketKey(g.market);
 
-function roundTo(x, step) {
-  const s = toNumber(step);
-  if (!Number.isFinite(x) || !Number.isFinite(s) || s <= 0) return NaN;
-  // Round half away from zero
-  return Math.sign(x) * Math.round(Math.abs(x) / s) * s;
-}
+    const gameTime = (() => {
+      const t = g.time || g.commence_time;
+      if (!t) return "TBD";
+      try {
+        return new Date(t).toLocaleTimeString("en-US", {
+          hour: "numeric",
+          minute: "2-digit",
+          timeZone: "America/New_York"
+        });
+      } catch {
+        return String(t);
+      }
+    })();
 
-export function computeStakeFromAlert(alert) {
-  const mode = (process.env.STAKE_MODE || "bankroll").toLowerCase();
+    const holdText  = (typeof g.hold === "number") ? ` • Hold ${(g.hold * 100).toFixed(1)}%` : "";
+    const sharpText = g.sharpLabel ? ` *${g.sharpLabel}*` : "";
 
-  if (mode !== "bankroll") {
-    return { stakeUsd: null, stakeUsdRounded: null, kellyFullUsed: null, reason: "STAKE_MODE not bankroll" };
-  }
-
-  const BANKROLL_USD   = toNumber(process.env.BANKROLL_USD);
-  const KELLY_FRACTION = toNumber(process.env.KELLY_FRACTION);
-  const KELLY_MAX_USD  = toNumber(process.env.KELLY_MAX_USD);
-  const STAKE_ROUND_TO = toNumber(process.env.STAKE_ROUND_TO || 1);
-
-  if (!Number.isFinite(BANKROLL_USD) || BANKROLL_USD <= 0) {
-    return { stakeUsd: 0, stakeUsdRounded: 0, kellyFullUsed: 0, reason: "Invalid BANKROLL_USD" };
-  }
-  const frac = Number.isFinite(KELLY_FRACTION) ? Math.max(0, Math.min(1, KELLY_FRACTION)) : 0.25;
-  const maxCap = Number.isFinite(KELLY_MAX_USD) ? Math.max(0, KELLY_MAX_USD) : Infinity;
-  const roundStep = Number.isFinite(STAKE_ROUND_TO) && STAKE_ROUND_TO > 0 ? STAKE_ROUND_TO : 1;
-
-  // 1) Preferred: explicit kellyFull provided by analysis
-  let kellyFull = toNumber(alert?.metrics?.kellyFull);
-  if (!Number.isFinite(kellyFull)) {
-    // 2) Next: metrics.kelly if it looks like a fraction [0..1]
-    const kMaybe = toNumber(alert?.metrics?.kelly);
-    if (Number.isFinite(kMaybe) && kMaybe >= 0 && kMaybe <= 1) {
-      kellyFull = kMaybe;
+    // Best price/alt-line summary (if present)
+    let best = "";
+    if (g.best) {
+      const seg = [];
+      if (g.best.FAV)  seg.push(`⭐ Fav ${g.best.FAV.point ?? ""} — *${g.best.FAV.book}* (${g.best.FAV.price})`);
+      if (g.best.DOG)  seg.push(`🐶 Dog ${g.best.DOG.point ?? ""} — *${g.best.DOG.book}* (${g.best.DOG.price})`);
+      if (g.best.home) seg.push(`🏠 ${g.home} — *${g.best.home.book}* (${g.best.home.price})`);
+      if (g.best.away) seg.push(`Away: ${g.away} — *${g.best.away.book}* (${g.best.away.price})`);
+      if (g.best.O)    seg.push(`⬆️ Over ${g.best.O.point ?? ""} — *${g.best.O.book}* (${g.best.O.price})`);
+      if (g.best.U)    seg.push(`⬇️ Under ${g.best.U.point ?? ""} — *${g.best.U.book}* (${g.best.U.price})`);
+      if (seg.length) best = "\n" + seg.join("\n");
     }
-  }
 
-  // 3) Fallback: derive from fair prob + offered price
-  if (!Number.isFinite(kellyFull)) {
-    const p = toNumber(alert?.metrics?.fair_prob);
-    const american = alert?.pick?.price ?? alert?.price;
-    const k = kellyFromProbAndPrice(p, american);
-    if (Number.isFinite(k)) kellyFull = k;
-  }
+    const splits = (typeof g.tickets === "number" && typeof g.handle === "number")
+      ? `\n📈 Tickets ${g.tickets}% | Handle ${g.handle}%` : "";
 
-  if (!Number.isFinite(kellyFull) || kellyFull <= 0) {
-    return { stakeUsd: 0, stakeUsdRounded: 0, kellyFullUsed: 0, reason: "No positive Kelly" };
-  }
+    // Build message lines (plain-text matchup as requested)
+    const lines = [
+      `📊 *GoSignals*${sharpText}`,
+      `🕒 ${gameTime}  •  🎯 ${market}${holdText}`,
+      `Away: ${g.away} @ ${g.home}`,
+      best,
+      splits
+    ].filter(Boolean);
 
-  // Fractional Kelly
-  let stake = BANKROLL_USD * kellyFull * frac;
+    // Stake line (bankroll mode)
+    const stakeLine = formatStakeLineForTelegram(g);
+    if (stakeLine) lines.push(stakeLine);
 
-  // Clamp to max and non-negative
-  if (stake < 0) stake = 0;
-  if (Number.isFinite(maxCap)) stake = Math.min(stake, maxCap);
+    // Play-to line (EV ≥ EV_MIN_FOR_PLAYTO; default 0 if unset)
+    const pFair = inferFairProbForPick(g);
+    const playToLine = Number.isFinite(pFair) ? formatPlayToLineML(pFair, process.env.EV_MIN_FOR_PLAYTO) : null;
+    if (playToLine) lines.push(playToLine);
 
-  const stakeRounded = roundTo(stake, roundStep);
-  return {
-    stakeUsd: stake,
-    stakeUsdRounded: Math.max(0, stakeRounded || 0),
-    kellyFullUsed: kellyFull,
-    reason: "ok",
-  };
-}
-
-export function formatStakeLineForTelegram(alert) {
-  const { stakeUsdRounded } = computeStakeFromAlert(alert);
-  if (stakeUsdRounded <= 0) return "Stake: $0 • PASS";
-  const frac = toNumber(process.env.KELLY_FRACTION);
-  const fracTxt = Number.isFinite(frac) && frac > 0 ? `Kelly ${frac}` : "Kelly";
-  return `Stake: $${stakeUsdRounded} (${fracTxt})`;
+    return lines.join("\n").trim();
+  });
 }

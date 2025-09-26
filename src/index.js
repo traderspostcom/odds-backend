@@ -128,33 +128,68 @@ function mapMarketKey(market = "") {
  * Format one alert object for Telegram.
  * If your analyzer attaches ev/kelly/strength/tags, they’ll show up.
  */
+// ---- replace your existing formatter with this ----
 function formatAlertForTelegram(a) {
-  const game = a?.game || {};
-  const away = a?.away || game.away || "-";
-  const home = a?.home || game.home || "-";
-
-  // kickoff time
-  const tRaw = game.start_time_utc || a?.commence_time || null;
-  let tET = "TBD";
-  if (tRaw) {
+  // helpers
+  const pick = (key) => (Array.isArray(a?.signals) ? a.signals.find(s => s.key === key) : null);
+  const etTime = (() => {
+    const iso = a?.game?.start_time_utc;
+    if (!iso) return "TBD";
     try {
-      const dt = new Date(tRaw);
-      tET = dt.toLocaleTimeString("en-US", {
+      const dt = new Date(iso);
+      const date = new Intl.DateTimeFormat("en-US", {
         timeZone: "America/New_York",
-        hour: "numeric",
-        minute: "2-digit"
-      });
-    } catch (_) { tET = String(tRaw); }
-  }
+        month: "short", day: "numeric"
+      }).format(dt);
+      const time = new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York",
+        hour: "numeric", minute: "2-digit"
+      }).format(dt);
+      return `${date}, ${time} ET`;
+    } catch { return "TBD"; }
+  })();
 
-  const market = mapMarketKey(a?.market || (a?.sport ? `${String(a.sport).toUpperCase()} H2H` : "H2H"));
+  // market label
+  const marketRaw = String(a?.market || "").toUpperCase();
+  const isF5 = /F5/.test(marketRaw);
+  const marketLabel = isF5 ? "Moneyline – 1st 5 Innings (ML F5)" : "Moneyline (ML)";
 
-  // Sharp side and price line if present
-  const sharpTeam = a?.sharp_side?.team || a?.sharp_side?.side || "-";
-  const sharpLine = (a?.lines?.sharp_entry != null)
-    ? (a.lines.sharp_entry >= 0 ? `+${a.lines.sharp_entry}` : `${a.lines.sharp_entry}`)
+  // EV% and Hold (pulled from signals labels if present)
+  const evSig   = pick("ev_pct");
+  const holdSig = pick("hold");
+  const evText   = evSig?.label?.replace(/\s+/g, " ").trim() || null;        // e.g., "+6.28% EV"
+  const holdText = holdSig?.label?.replace(/\s+/g, " ").trim() || null;      // e.g., "Hold 3.71%"
+
+  // pick line
+  const side  = a?.sharp_side?.side || "-";
+  const team  = a?.sharp_side?.team || "-";
+  const book  = a?.lines?.book || "-";
+  const entry = a?.lines?.sharp_entry;
+  const price = (entry != null)
+    ? (entry > 0 ? `+${entry}` : `${entry}`)
     : "-";
-  const onBook = a?.lines?.book || (a?.best && a.best.book) || "-";
+
+  // header strength / tags
+  const strength = a?.render?.strength || "Lean";
+  const tags = Array.isArray(a?.render?.tags) ? a.render.tags.join(", ") : (a?.source || "").toUpperCase();
+
+  // Build message (plain text with clear spacing)
+  const lines = [];
+  lines.push("🔔 GoSignals Alert");
+  lines.push(`Mode: ${tags || "—"}`);
+  lines.push("");
+  lines.push(`🗓️ ${etTime}`);
+  lines.push(`⚔️ ${a?.game?.away || a?.away || "TBD"} @ ${a?.game?.home || a?.home || "TBD"}`);
+  lines.push("");
+  lines.push(`🎯 Market: ${marketLabel}`);
+  lines.push("");
+  lines.push(`✅ Pick: ${team} (${side})  @ ${price}  on ${book}`);
+  if (evText)   lines.push(`📈 ${evText}`);
+  if (holdText) lines.push(`💰 ${holdText}`);
+
+  return lines.join("\n");
+}
+
 
   // Strength/tag badges if your analyzer provides them
   const strength = a?.render?.strength || a?.strength || "";

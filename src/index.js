@@ -145,7 +145,7 @@ function fmtTimeET(iso) {
 function formatAlertForTelegram(a) {
   // Title line
   const emoji = a?.render?.emoji || "🚨";
-  const title = `*GoSignals Alert* – ${a?.sport?.toUpperCase() || ""} ${mapMarketLabel(a?.market)}`;
+  const title = `*GoSignals Alert*
   const strength = a?.render?.strength || ""; // e.g., 🟡 Lean / 🟢 Strong
 
   // Matchup + time

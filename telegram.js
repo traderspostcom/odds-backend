@@ -1,4 +1,4 @@
-// src/telegram.js — ESM, includes bankroll stake line, Play-to line, and plain "Away:" matchup
+// src/telegram.js — ESM, bankroll Stake + Play-to + backend quiet-hours
 
 import fetch from "node-fetch";
 import { formatStakeLineForTelegram } from "./utils/stake.js";
@@ -7,11 +7,55 @@ import { formatPlayToLineML } from "./utils/playto.js";
 const TELEGRAM_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
+// -------- Quiet-hours helpers (ET) --------
+function parseHHMM(s) {
+  if (!s || typeof s !== "string") return null;
+  const m = s.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const h = Number(m[1]), min = Number(m[2]);
+  if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+  return h * 60 + min;
+}
+
+function nowInET() {
+  // Convert "now" into an ET Date object
+  return new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+}
+
+function isWithinQuietHoursET(startHHMM, endHHMM, now = nowInET()) {
+  const start = parseHHMM(startHHMM);
+  const end = parseHHMM(endHHMM);
+  if (start === null || end === null) return false; // not configured => not quiet
+
+  const t = now.getHours() * 60 + now.getMinutes();
+  // normal window (e.g., 10:00 → 21:00)
+  if (start <= end) return t >= start && t < end;
+  // overnight window (e.g., 21:00 → 10:00 next day)
+  return t >= start || t < end;
+}
+
+function shouldBlockTelegramSend() {
+  if (process.env.QUIET_FORCE === "1") return false; // manual override
+  if (process.env.QUIET_HOURS_BLOCK_SEND !== "true") return false;
+
+  const start = process.env.QUIET_HOURS_START_ET || "21:00";
+  const end   = process.env.QUIET_HOURS_END_ET   || "10:00";
+  return isWithinQuietHoursET(start, end);
+}
+
+// -------- Telegram send --------
 export async function sendTelegramMessage(text) {
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
     console.error("❌ Telegram not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)");
     return;
   }
+
+  if (shouldBlockTelegramSend()) {
+    const now = nowInET().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+    console.log(`🔕 Quiet hours active at ${now} ET — message suppressed.`);
+    return;
+  }
+
   const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
   try {
     const res = await fetch(url, {
@@ -25,115 +69,4 @@ export async function sendTelegramMessage(text) {
       })
     });
     if (!res.ok) {
-      console.error("❌ Telegram send failed:", await res.text());
-    } else {
-      console.log("📨 Telegram alert sent!");
-    }
-  } catch (err) {
-    console.error("❌ Telegram send error:", err);
-  }
-}
-
-function mapMarketKey(market) {
-  const norm = String(market || "").toLowerCase().replace(/[_\-\s]/g, "");
-  switch (true) {
-    case norm === "h2h":                return "ML";
-    case norm === "h2h1st5innings":     return "ML (F5)";
-    case norm === "spreads":            return "SP";
-    case norm === "spreads1st5innings": return "SP (F5)";
-    case norm === "totals":             return "TOT";
-    case norm === "totals1st5innings":  return "TOT (F5)";
-    case norm === "teamtotals":         return "TT";
-    default:                            return (market || "").toUpperCase();
-  }
-}
-
-// helpers to infer fair probability for the picked side (best-effort, safe to fail)
-function num(x) { const n = Number(x); return Number.isFinite(n) ? n : NaN; }
-function inferPickedSide(g) {
-  const sideField = String(g?.side || g?.sharp_side?.side || "").toLowerCase();
-  if (sideField === "home" || sideField === "away") return sideField;
-  if (g?.best?.away && !g?.best?.home) return "away";
-  if (g?.best?.home && !g?.best?.away) return "home";
-  return null;
-}
-function inferFairProbForPick(g) {
-  const fh = num(g?.metrics?.fair_home ?? g?.fair_home);
-  const fa = num(g?.metrics?.fair_away ?? g?.fair_away);
-  const fp = num(g?.metrics?.fair_prob ?? g?.fair_prob);
-  const side = inferPickedSide(g);
-
-  if (side === "home") {
-    if (Number.isFinite(fh)) return fh;
-    if (Number.isFinite(fa)) return 1 - fa;
-  }
-  if (side === "away") {
-    if (Number.isFinite(fa)) return fa;
-    if (Number.isFinite(fh)) return 1 - fh;
-  }
-  if (Number.isFinite(fp)) return fp;
-  return NaN;
-}
-
-/**
- * Formats an array of alert objects into Telegram-ready strings.
- * Each element in the returned array is a full message block.
- */
-export function formatSharpBatch(alerts) {
-  return (alerts || []).map(g => {
-    const market = mapMarketKey(g.market);
-
-    const gameTime = (() => {
-      const t = g.time || g.commence_time;
-      if (!t) return "TBD";
-      try {
-        return new Date(t).toLocaleTimeString("en-US", {
-          hour: "numeric",
-          minute: "2-digit",
-          timeZone: "America/New_York"
-        });
-      } catch {
-        return String(t);
-      }
-    })();
-
-    const holdText  = (typeof g.hold === "number") ? ` • Hold ${(g.hold * 100).toFixed(1)}%` : "";
-    const sharpText = g.sharpLabel ? ` *${g.sharpLabel}*` : "";
-
-    // Best price/alt-line summary (if present)
-    let best = "";
-    if (g.best) {
-      const seg = [];
-      if (g.best.FAV)  seg.push(`⭐ Fav ${g.best.FAV.point ?? ""} — *${g.best.FAV.book}* (${g.best.FAV.price})`);
-      if (g.best.DOG)  seg.push(`🐶 Dog ${g.best.DOG.point ?? ""} — *${g.best.DOG.book}* (${g.best.DOG.price})`);
-      if (g.best.home) seg.push(`🏠 ${g.home} — *${g.best.home.book}* (${g.best.home.price})`);
-      if (g.best.away) seg.push(`Away: ${g.away} — *${g.best.away.book}* (${g.best.away.price})`);
-      if (g.best.O)    seg.push(`⬆️ Over ${g.best.O.point ?? ""} — *${g.best.O.book}* (${g.best.O.price})`);
-      if (g.best.U)    seg.push(`⬇️ Under ${g.best.U.point ?? ""} — *${g.best.U.book}* (${g.best.U.price})`);
-      if (seg.length) best = "\n" + seg.join("\n");
-    }
-
-    const splits = (typeof g.tickets === "number" && typeof g.handle === "number")
-      ? `\n📈 Tickets ${g.tickets}% | Handle ${g.handle}%` : "";
-
-    // Build message lines (plain-text matchup as requested)
-    const lines = [
-      `📊 *GoSignals*${sharpText}`,
-      `🕒 ${gameTime}  •  🎯 ${market}${holdText}`,
-      `Away: ${g.away} @ ${g.home}`,
-      best,
-      splits
-    ].filter(Boolean);
-
-    // Stake line (bankroll mode)
-    const stakeLine = formatStakeLineForTelegram(g);
-    if (stakeLine) lines.push(stakeLine);
-
-    // Play-to line (EV ≥ EV_MIN_FOR_PLAYTO; default 0 if unset)
-    const pFair = inferFairProbForPick(g);
-    const playToLine = Number.isFinite(pFair) ? formatPlayToLineML(pFair, process.env.EV_MIN_FOR_PLAYTO) : null;
-    if (playToLine) lines.push(playToLine);
-
-    return lines.join("\n").trim();
-  });
-}
+      console.error("❌ Telegram send failed:", awai

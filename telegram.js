@@ -1,91 +1,96 @@
-// src/telegram.js
-import fetch from "node-fetch";
+/* src/utils/stake.js — Bankroll staking helper for GoSignals (ESM) */
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+function toNumber(x) {
+  if (x === null || x === undefined) return NaN;
+  const n = typeof x === "number" ? x : parseFloat(String(x));
+  return Number.isFinite(n) ? n : NaN;
+}
 
-/* -------------------- Send Message (HTML mode) -------------------- */
-export async function sendTelegramMessage(message) {
-  try {
-    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text: message,
-        parse_mode: "HTML",
-        disable_web_page_preview: true
-      })
-    });
+export function americanToDecimal(american) {
+  const a = toNumber(american);
+  if (!Number.isFinite(a)) return NaN;
+  if (a >= 100) return 1 + a / 100;
+  if (a <= -100) return 1 + 100 / Math.abs(a);
+  return NaN;
+}
 
-    if (!res.ok) {
-      console.error("❌ Telegram send failed:", await res.text());
-    } else {
-      console.log("📨 Telegram alert sent!");
-    }
-  } catch (err) {
-    console.error("❌ Telegram send error:", err);
+// Kelly fraction k = (d*p - 1) / (d - 1), where d = decimal odds, p = fair prob
+export function kellyFromProbAndPrice(p, americanPrice) {
+  const pNum = toNumber(p);
+  const d = americanToDecimal(americanPrice);
+  if (!Number.isFinite(pNum) || !Number.isFinite(d) || d <= 1) return NaN;
+  const k = (d * pNum - 1) / (d - 1);
+  return k;
+}
+
+function roundTo(x, step) {
+  const s = toNumber(step);
+  if (!Number.isFinite(x) || !Number.isFinite(s) || s <= 0) return NaN;
+  // Round half away from zero
+  return Math.sign(x) * Math.round(Math.abs(x) / s) * s;
+}
+
+export function computeStakeFromAlert(alert) {
+  const mode = (process.env.STAKE_MODE || "bankroll").toLowerCase();
+
+  if (mode !== "bankroll") {
+    return { stakeUsd: null, stakeUsdRounded: null, kellyFullUsed: null, reason: "STAKE_MODE not bankroll" };
   }
-}
 
-/* -------------------- Market Key Mapper -------------------- */
-function mapMarketKey(market) {
-  const norm = (market || "").toLowerCase().replace(/[_\-\s]/g, "");
-  if (norm === "h2h" || norm === "h2h1st5innings") return "ML";
-  if (norm === "totals" || norm === "totals1st5innings") return "TOT";
-  if (norm === "spreads" || norm === "spreads1st5innings") return "SP";
-  if (norm === "teamtotals" || norm === "teamtotals1st5innings") return "TT";
-  return (market || "").toUpperCase();
-}
+  const BANKROLL_USD   = toNumber(process.env.BANKROLL_USD);
+  const KELLY_FRACTION = toNumber(process.env.KELLY_FRACTION);
+  const KELLY_MAX_USD  = toNumber(process.env.KELLY_MAX_USD);
+  const STAKE_ROUND_TO = toNumber(process.env.STAKE_ROUND_TO || 1);
 
-/* -------------------- Pretty Card-Style Formatter -------------------- */
-export function formatSharpBatch(games) {
-  return games.map((g) => {
-    const market = mapMarketKey(g.market);
-    const gameTimeISO = g.time || g.commence_time || null;
+  if (!Number.isFinite(BANKROLL_USD) || BANKROLL_USD <= 0) {
+    return { stakeUsd: 0, stakeUsdRounded: 0, kellyFullUsed: 0, reason: "Invalid BANKROLL_USD" };
+  }
+  const frac = Number.isFinite(KELLY_FRACTION) ? Math.max(0, Math.min(1, KELLY_FRACTION)) : 0.25;
+  const maxCap = Number.isFinite(KELLY_MAX_USD) ? Math.max(0, KELLY_MAX_USD) : Infinity;
+  const roundStep = Number.isFinite(STAKE_ROUND_TO) && STAKE_ROUND_TO > 0 ? STAKE_ROUND_TO : 1;
 
-    // format time in ET
-    let timeEt = "TBD";
-    if (gameTimeISO) {
-      try {
-        const dt = new Date(gameTimeISO);
-        timeEt = dt.toLocaleTimeString("en-US", {
-          hour: "numeric",
-          minute: "2-digit",
-          timeZone: "America/New_York"
-        });
-      } catch { /* noop */ }
+  // 1) Preferred: explicit kellyFull provided by analysis
+  let kellyFull = toNumber(alert?.metrics?.kellyFull);
+  if (!Number.isFinite(kellyFull)) {
+    // 2) Next: metrics.kelly if it looks like a fraction [0..1]
+    const kMaybe = toNumber(alert?.metrics?.kelly);
+    if (Number.isFinite(kMaybe) && kMaybe >= 0 && kMaybe <= 1) {
+      kellyFull = kMaybe;
     }
+  }
 
-    // optional “(Lean/Strong)” if provided upstream
-    const sharp = g.sharpLabel ? ` (${g.sharpLabel})` : "";
+  // 3) Fallback: derive from fair prob + offered price
+  if (!Number.isFinite(kellyFull)) {
+    const p = toNumber(alert?.metrics?.fair_prob);
+    const american = alert?.pick?.price ?? alert?.price;
+    const k = kellyFromProbAndPrice(p, american);
+    if (Number.isFinite(k)) kellyFull = k;
+  }
 
-    // build best-price lines
-    const lines = [];
-    if (g.best?.home) lines.push(`🏠 <b>${g.home}</b>: <b>${g.best.home.book}</b> (${g.best.home.price})`);
-    if (g.best?.away) lines.push(`🛫 <b>${g.away}</b>: <b>${g.best.away.book}</b> (${g.best.away.price})`);
-    if (g.best?.FAV)  lines.push(`⭐ Fav ${g.best.FAV.point ?? ""}: <b>${g.best.FAV.book}</b> (${g.best.FAV.price})`);
-    if (g.best?.DOG)  lines.push(`🐶 Dog ${g.best.DOG.point ?? ""}: <b>${g.best.DOG.book}</b> (${g.best.DOG.price})`);
-    if (g.best?.O)    lines.push(`⬆️ Over ${g.best.O.point ?? ""}: <b>${g.best.O.book}</b> (${g.best.O.price})`);
-    if (g.best?.U)    lines.push(`⬇️ Under ${g.best.U.point ?? ""}: <b>${g.best.U.book}</b> (${g.best.U.price})`);
+  if (!Number.isFinite(kellyFull) || kellyFull <= 0) {
+    return { stakeUsd: 0, stakeUsdRounded: 0, kellyFullUsed: 0, reason: "No positive Kelly" };
+  }
 
-    const hold = (typeof g.hold === "number")
-      ? `\n💰 Hold: <b>${(g.hold * 100).toFixed(2)}%</b>`
-      : "";
+  // Fractional Kelly
+  let stake = BANKROLL_USD * kellyFull * frac;
 
-    const th = (typeof g.tickets === "number" && typeof g.handle === "number")
-      ? `\n📈 Tickets: ${g.tickets}% | Handle: ${g.handle}%`
-      : "";
+  // Clamp to max and non-negative
+  if (stake < 0) stake = 0;
+  if (Number.isFinite(maxCap)) stake = Math.min(stake, maxCap);
 
-    const header =
-      `📊 <b>GoSignals Sharp Alert${sharp}!</b>\n\n` +
-      `🕘 ${timeEt}\n` +
-      `⚔️ ${g.away} @ ${g.home}\n\n` +
-      `🎯 Market: <b>${market}</b>\n\n`;
+  const stakeRounded = roundTo(stake, roundStep);
+  return {
+    stakeUsd: stake,
+    stakeUsdRounded: Math.max(0, stakeRounded || 0),
+    kellyFullUsed: kellyFull,
+    reason: "ok",
+  };
+}
 
-    const body = lines.length ? lines.join("\n") + hold + th : "No priced books available.";
-
-    return header + body;
-  });
+export function formatStakeLineForTelegram(alert) {
+  const { stakeUsdRounded } = computeStakeFromAlert(alert);
+  if (stakeUsdRounded <= 0) return "Stake: $0 • PASS";
+  const frac = toNumber(process.env.KELLY_FRACTION);
+  const fracTxt = Number.isFinite(frac) && frac > 0 ? `Kelly ${frac}` : "Kelly";
+  return `Stake: $${stakeUsdRounded} (${fracTxt})`;
 }

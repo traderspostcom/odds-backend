@@ -159,22 +159,20 @@ function formatAlertForTelegram(a) {
   const matchup = `${a?.game?.away || a?.away || "Away"} @ ${a?.game?.home || a?.home || "Home"}`;
 
   const parts = [
-    `${title}\n`,
+    `${title}`,
     `*${market}*  ${strength}`,
-    `🕒 ${gameTimeEt}`,
-    `${matchup}`,   // removed ⚔️ here
-    `🎯 Pick: *${a?.sharp_side?.team || "-"}* (${a?.sharp_side?.side || "-"}) @ ${entryText} on *${book}*`,
+    `🕒 ${gameTimeEt}\n${matchup}`, // matchup right under time, no blank line
+    `🎯 Pick: *${a?.sharp_side?.team || "-"}* (${a?.sharp_side?.side || "-"}) @ ${entryText} on *${book}*`
   ];
 
   const extras = [];
   if (evText)   extras.push(`${evIcon} ${evText}`);
   if (edgeText) extras.push(`📊 ${edgeText}`);
   if (kellyText) extras.push(`💵 ${kellyText}`);
-  if (extras.length) parts.push("", ...extras);
+  if (extras.length) parts.push(...extras); // no leading blank line here
 
   return parts.join("\n\n").trim();
 }
-
 
 
 /* -------------------------------- routes -------------------------------- */

@@ -162,7 +162,7 @@ function formatAlertForTelegram(a) {
 
   // EV
   const evPct = fmtEVFromSignals(a?.signals || []);
-  const evLine = evPct != null ? `\n💹 *EV*: ${evPct.toFixed(2)}%` : "";
+  const evLine = evPct != null ? `\n➕ *EV*: ${evPct.toFixed(2)}%` : "";
 
   // Layout with spacing
   let msg = "";

@@ -161,7 +161,7 @@ function formatAlertForTelegram(a) {
   const priceTxt = price == null ? "?" : (price >= 0 ? `+${price}` : `${price}`);
 
   // EV
-  const evPct = fmtEVFromSignals(a?.signals || []);
+  const evPct = fmtFromSignals(a?.signals || []);
   const evLine = evPct != null ? `\n➕ *EV*: ${evPct.toFixed(2)}%` : "";
 
   // Layout with spacing
@@ -174,7 +174,7 @@ function formatAlertForTelegram(a) {
   msg += `\n`;
   msg += `🎯 Market: *${mapMarketLabel(a?.market)}*\n`;
   msg += `\n`;
-  msg += `✅ Pick: *${sideTeam}* (${sideSide}) @ *${priceTxt}*  on *${book || "—"}*\n`;
+  msg += `💎 Pick: *${sideTeam}* (${sideSide}) @ *${priceTxt}*  on *${book || "—"}*\n`;
   msg += evLine; // includes its own leading \n if present
   msg += `\n`;
   if (Array.isArray(a?.render?.tags) && a.render.tags.length) {

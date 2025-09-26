@@ -170,7 +170,7 @@ function formatAlertForTelegram(a) {
   if (strength) msg += `_${strength}_\n`;
   msg += `\n`;
   msg += `🗓 ${whenET} ET\n`;
-  msg += `⚔️ ${away} @ ${home}\n`;
+  msg += `${away} @ ${home}\n`;
   msg += `\n`;
   msg += `🎯 Market: *${mapMarketLabel(a?.market)}*\n`;
   msg += `\n`;

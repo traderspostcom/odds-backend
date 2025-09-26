@@ -166,14 +166,14 @@ function formatAlertForTelegram(a) {
     `🎯 Pick: *${a?.sharp_side?.team || "-"}* (${a?.sharp_side?.side || "-"}) @ ${entryText} on *${book}*`,
   ];
 
-  const extras = [];
-  if (evText)   extras.push(`${evIcon} ${evText}`);
-  if (edgeText) extras.push(`📊 ${edgeText}`);
-  if (kellyText) extras.push(`💵 ${kellyText}`);
-  if (extras.length) parts.push("", ...extras);
+const extras = [];
+if (evText)   extras.push(`${evIcon} ${evText}`);
+if (edgeText) extras.push(`📊 ${edgeText}`);
+if (kellyText) extras.push(`💵 ${kellyText}`);
+if (extras.length) parts.push("", ...extras);
 
-  return parts.join("\n").trim();
-}
+return parts.join("\n\n").trim();
+
 
 /* -------------------------------- routes -------------------------------- */
 

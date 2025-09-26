@@ -122,9 +122,9 @@ function mapMarketLabel(market) {
 
 // Format a single alert into a message
 function formatAlertForTelegram(a) {
-  const siren = "🚨";       // leading icon
-  const evIcon = "📈";      // EV icon
-  const strength = a?.render?.strength || ""; // e.g., 🟡 Lean / 🟢 Strong
+  const siren = "🚨";
+  const evIcon = "📈";
+  const strength = a?.render?.strength || "";
 
   // Date/time in ET
   let gameTimeEt = "TBD";
@@ -140,7 +140,7 @@ function formatAlertForTelegram(a) {
     } catch {}
   }
 
-  // EV, Edge, Kelly if present in signals
+  // EV, Edge, Kelly if present
   const sigs = Array.isArray(a?.signals) ? a.signals : [];
   const evSig     = sigs.find(s => /ev_pct/i.test(s.key || ""));
   const edgeSig   = sigs.find(s => /edge_pct/i.test(s.key || ""));
@@ -155,13 +155,20 @@ function formatAlertForTelegram(a) {
   const book = a?.lines?.book || "-";
 
   const title = `*${siren} GoSignals Alert*`;
-  const market = `${(a?.sport || "").toUpperCase()} ${mapMarketLabel(a?.market)}`;
+
+  // Avoid duplicate sport name
+  const mappedMarket = mapMarketLabel(a?.market);
+  const sport = (a?.sport || "").toUpperCase();
+  const market = mappedMarket.toUpperCase().startsWith(sport)
+    ? mappedMarket
+    : `${sport} ${mappedMarket}`;
+
   const matchup = `${a?.game?.away || a?.away || "Away"} @ ${a?.game?.home || a?.home || "Home"}`;
 
   const parts = [
     `${title}`,
     `*${market}*  ${strength}`,
-    `🕒 ${gameTimeEt}\n${matchup}`, // matchup right under time, no blank line
+    `🕒 ${gameTimeEt}\n${matchup}`,
     `🎯 Pick: *${a?.sharp_side?.team || "-"}* (${a?.sharp_side?.side || "-"}) @ ${entryText} on *${book}*`
   ];
 
@@ -169,11 +176,10 @@ function formatAlertForTelegram(a) {
   if (evText)   extras.push(`${evIcon} ${evText}`);
   if (edgeText) extras.push(`📊 ${edgeText}`);
   if (kellyText) extras.push(`💵 ${kellyText}`);
-  if (extras.length) parts.push(...extras); // no leading blank line here
+  if (extras.length) parts.push(...extras);
 
   return parts.join("\n\n").trim();
 }
-
 
 /* -------------------------------- routes -------------------------------- */
 

@@ -1,8 +1,7 @@
-// telegram.js (root) — Formats exactly per Russ’s sample, with blank lines.
-// Quiet-hours (ET) gating included. Shows Kelly % line; NO Stake/Play-to lines.
+// telegram.js (root) — Russ layout with blank lines; shows EV, Edge, Kelly, Stake, and Play-to.
+// Quiet-hours gating (ET) + per-call bypass via sendTelegramMessage(text, { force:true }).
 
-//
-// ---------------------- Quiet-hours (ET) ----------------------
+/* ---------------------- Quiet-hours (ET) ---------------------- */
 function parseHHMM(s) {
   if (!s || typeof s !== "string") return null;
   const m = s.trim().match(/^(\d{1,2}):(\d{2})$/);
@@ -19,33 +18,40 @@ function isWithinQuietHoursET(startHHMM, endHHMM, now = nowInET()) {
   const end = parseHHMM(endHHMM);
   if (start === null || end === null) return false;
   const t = now.getHours() * 60 + now.getMinutes();
-  if (start <= end) return t >= start && t < end;   // same day
-  return t >= start || t < end;                     // overnight
+  if (start <= end) return t >= start && t < end;   // same-day window
+  return t >= start || t < end;                     // overnight window
 }
 function shouldBlockTelegramSend() {
-  if (process.env.QUIET_FORCE === "1") return false;
+  if (process.env.QUIET_FORCE === "1") return false;             // global override
   if (process.env.QUIET_HOURS_BLOCK_SEND !== "true") return false;
   const start = process.env.QUIET_HOURS_START_ET || "21:00";
   const end   = process.env.QUIET_HOURS_END_ET   || "10:00";
   return isWithinQuietHoursET(start, end);
 }
 
-// ---------------------- Robust fetch (Node 18/20/22) ----------------------
+/* ---------------------- Robust fetch (Node 18/20/22) ---------------------- */
 async function doFetch(url, options) {
   const f = globalThis.fetch ?? (await import("node-fetch")).default;
   return f(url, options);
 }
 
-// ---------------------- Telegram send ----------------------
+/* ---------------------- Telegram send ---------------------- */
 const TELEGRAM_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-export async function sendTelegramMessage(text) {
+/**
+ * Send a Telegram message.
+ * @param {string} text
+ * @param {{force?: boolean}} [opts] - if force===true, bypass quiet-hours for this call
+ */
+export async function sendTelegramMessage(text, opts = {}) {
+  const force = !!opts.force;
+
   if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
     console.error("❌ Telegram not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)");
     return;
   }
-  if (shouldBlockTelegramSend()) {
+  if (!force && shouldBlockTelegramSend()) {
     const now = nowInET().toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
     console.log(`🔕 Quiet hours active at ${now} ET — message suppressed.`);
     return;
@@ -72,20 +78,11 @@ export async function sendTelegramMessage(text) {
   }
 }
 
-// ---------------------- Formatting helpers ----------------------
-function mapMarketKey(market) {
-  const norm = String(market || "").toLowerCase().replace(/[_\-\s]/g, "");
-  switch (true) {
-    case norm === "h2h":                return "ML";
-    case norm === "h2h1st5innings":     return "ML (F5)";
-    case norm === "spreads":            return "SP";
-    case norm === "spreads1st5innings": return "SP (F5)";
-    case norm === "totals":             return "TOT";
-    case norm === "totals1st5innings":  return "TOT (F5)";
-    case norm === "teamtotals":         return "TT";
-    default:                            return (market || "").toUpperCase();
-  }
+export function sendTelegramMessageForced(text) {
+  return sendTelegramMessage(text, { force: true });
 }
+
+/* ---------------------- Odds/EV helpers ---------------------- */
 function num(x) { const n = Number(x); return Number.isFinite(n) ? n : NaN; }
 function americanToDecimal(american) {
   const a = num(american);
@@ -100,6 +97,38 @@ function kellyFromProbAndPrice(p, americanPrice) {
   const d = americanToDecimal(americanPrice);
   if (!Number.isFinite(pNum) || !Number.isFinite(d) || d <= 1) return NaN;
   return (d * pNum - 1) / (d - 1);
+}
+
+/* ---------------------- Play-to helpers ---------------------- */
+// Convert decimal odds to American (rounded)
+function decimalToAmerican(d) {
+  const dec = num(d);
+  if (!Number.isFinite(dec) || dec <= 1) return NaN;
+  if (dec >= 2.0) return Math.round(100 * (dec - 1)); // underdog
+  return Math.round(-100 / (dec - 1));                 // favorite
+}
+// Given fair probability p and EV floor, return the worst American price to take
+function americanPlayToFromProb(p, evMin = 0) {
+  const prob = num(p);
+  const ev = num(evMin);
+  if (!Number.isFinite(prob) || prob <= 0 || prob >= 1) return NaN;
+  const dStar = (1 + (Number.isFinite(ev) ? ev : 0)) / prob; // required decimal odds
+  return decimalToAmerican(dStar);
+}
+
+/* ---------------------- Formatting + inference helpers ---------------------- */
+function mapMarketKey(market) {
+  const norm = String(market || "").toLowerCase().replace(/[_\-\s]/g, "");
+  switch (true) {
+    case norm === "h2h":                return "ML";
+    case norm === "h2h1st5innings":     return "ML (F5)";
+    case norm === "spreads":            return "SP";
+    case norm === "spreads1st5innings": return "SP (F5)";
+    case norm === "totals":             return "TOT";
+    case norm === "totals1st5innings":  return "TOT (F5)";
+    case norm === "teamtotals":         return "TT";
+    default:                            return (market || "").toUpperCase();
+  }
 }
 function inferPickedSide(g) {
   const sideField = String(g?.side || g?.sharp_side?.side || "").toLowerCase();
@@ -153,6 +182,11 @@ function edgePercentFrom(g) {
   const edge = num(g?.metrics?.edge_pct ?? g?.edge_pct);
   return Number.isFinite(edge) ? edge * 100 : NaN;
 }
+
+/* ---------------------- Kelly + Stake + Play-to lines ---------------------- */
+// (We import the bankroll staking helper and format our own simple Stake line.)
+import { computeStakeFromAlert } from "./src/utils/stake.js";
+
 function kellyLineFromEnvAndAlert(g) {
   // Prefer explicit kellyFull; else metrics.kelly in [0,1]; else derive from p & price
   let kFull = num(g?.metrics?.kellyFull);
@@ -170,7 +204,7 @@ function kellyLineFromEnvAndAlert(g) {
   }
   if (!Number.isFinite(kFull) || kFull <= 0) return null;
 
-  // Fraction display using env (no stake output; just percentages & cap)
+  // Fraction display using env (no $ here; just % and cap)
   const frac = num(process.env.KELLY_FRACTION);
   const bank = num(process.env.BANKROLL_USD);
   const cap  = num(process.env.KELLY_MAX_USD);
@@ -184,16 +218,40 @@ function kellyLineFromEnvAndAlert(g) {
                     : Number.isFinite(v) ? `×${(+v).toFixed(2)}` : "");
 
   const parts = [];
-  parts.push(`Kelly ${pctFull.toFixed(1)}%`);
+  parts.push(`💵 Kelly ${pctFull.toFixed(1)}%`);
   if (Number.isFinite(pctFrac) && frac > 0) parts.push(`${fracSymbol(frac)} ${pctFrac.toFixed(1)}%`);
   if (Number.isFinite(cap) && Number.isFinite(bank) && bank > 0) {
     const capPct = (cap / bank) * 100;
     parts.push(`(cap ${capPct.toFixed(1)}%)`);
   }
-  return `💵 ${parts.join(" / ")}`;
+  return parts.join(" / ");
 }
 
-// ---------------------- Public: format batch (matches Russ’s layout) ----------------------
+function stakeLineFromEnvAndAlert(g) {
+  try {
+    const r = computeStakeFromAlert(g);
+    const amt = Number(r?.stakeUsdRounded);
+    if (!Number.isFinite(amt) || amt <= 0) return "Stake: $0 • PASS";
+    return `Stake: $${amt}`;
+  } catch {
+    return null;
+  }
+}
+
+function playToLine(g) {
+  const show = String(process.env.TG_SHOW_PLAYTO || "true").toLowerCase() === "true";
+  if (!show) return null;
+  const p = inferFairProbForPick(g);
+  if (!Number.isFinite(p)) return null;
+  const evMinEnv = num(process.env.EV_MIN_FOR_PLAYTO);
+  const evMin = Number.isFinite(evMinEnv) ? evMinEnv : 0; // 0 = break-even; e.g., 0.003 = +0.3% EV
+  const am = americanPlayToFromProb(p, evMin);
+  if (!Number.isFinite(am)) return null;
+  const sign = am > 0 ? "+" : "";
+  return `Play to: ${sign}${am}`;
+}
+
+/* ---------------------- Public: format batch (matches Russ’s layout) ---------------------- */
 export function formatSharpBatch(alerts) {
   return (alerts || []).map(g => {
     const market = mapMarketKey(g.market);
@@ -208,9 +266,10 @@ export function formatSharpBatch(alerts) {
     const edgePct = edgePercentFrom(g);
     const edgeLine = Number.isFinite(edgePct) ? `📊 Edge ${edgePct.toFixed(2)}%` : null;
 
-    const kLine = kellyLineFromEnvAndAlert(g);
+    const kLine   = kellyLineFromEnvAndAlert(g);
+    const stake   = stakeLineFromEnvAndAlert(g);  // NEW: $ stake line after Kelly
+    const ptLine  = playToLine(g);                // NEW: Play-to line
 
-    // Build with blank lines exactly like the sample
     const sections = [
       "🚨 GoSignals Alert",
       `${market}  ${strength}`.trim(),
@@ -218,7 +277,9 @@ export function formatSharpBatch(alerts) {
       pick,
       evLine,
       edgeLine,
-      kLine
+      kLine,
+      stake,
+      ptLine
     ].filter(Boolean);
 
     return sections.join("\n\n").trim();

@@ -1,4 +1,4 @@
-// telegram.js (root) — Full fat: Russ layout (blank lines) + Best-lines + Splits + Stake + Play-to
+// telegram.js (root) — Russ layout (blank lines) + Best-lines + Splits + Stake + Play-to (above EV)
 // Quiet-hours gating (ET) + per-call bypass via sendTelegramMessage(text, { force:true }).
 
 /* ---------------------- Quiet-hours (ET) ---------------------- */
@@ -39,9 +39,10 @@ async function doFetch(url, options) {
 const TELEGRAM_TOKEN   = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-/** Send a Telegram message.
- *  @param {string} text
- *  @param {{force?: boolean}} [opts] - if force===true, bypass quiet-hours for this call
+/**
+ * Send a Telegram message.
+ * @param {string} text
+ * @param {{force?: boolean}} [opts] - if force===true, bypass quiet-hours for this call
  */
 export async function sendTelegramMessage(text, opts = {}) {
   const force = !!opts.force;
@@ -99,14 +100,12 @@ function kellyFromProbAndPrice(p, americanPrice) {
 }
 
 /* ---------------------- Play-to helpers ---------------------- */
-// Convert decimal odds to American (rounded)
 function decimalToAmerican(d) {
   const dec = num(d);
   if (!Number.isFinite(dec) || dec <= 1) return NaN;
   if (dec >= 2.0) return Math.round(100 * (dec - 1)); // underdog
   return Math.round(-100 / (dec - 1));                 // favorite
 }
-// Given fair probability p and EV floor, return the worst American price to take
 function americanPlayToFromProb(p, evMin = 0) {
   const prob = num(p);
   const ev = num(evMin);
@@ -243,4 +242,70 @@ function kellyLineFromEnvAndAlert(g) {
   }
   return parts.join(" / ");
 }
-function
+function playToLine(g) {
+  const show = (process.env.TG_SHOW_PLAYTO || "true").toLowerCase() === "true";
+  if (!show) return null;
+  const p = inferFairProbForPick(g);
+  if (!Number.isFinite(p)) return null;
+  const evMinEnv = num(process.env.EV_MIN_FOR_PLAYTO);
+  const evMin = Number.isFinite(evMinEnv) ? evMinEnv : 0;
+  const am = americanPlayToFromProb(p, evMin);
+  if (!Number.isFinite(am)) return null;
+  const sign = am > 0 ? "+" : "";
+  return `Play to: ${sign}${am}`;
+}
+
+/* ---------------------- Stake (from src/utils/stake.js) ---------------------- */
+import { formatStakeLineForTelegram } from "./src/utils/stake.js";
+function stakeLine(g) {
+  const show = (process.env.TG_SHOW_STAKE || "true").toLowerCase() === "true";
+  if (!show) return null;
+  try {
+    const line = formatStakeLineForTelegram(g);
+    return line || null;
+  } catch {
+    return null;
+  }
+}
+
+/* ---------------------- Public: format batch (matches Russ’s layout) ---------------------- */
+export function formatSharpBatch(alerts) {
+  return (alerts || []).map(g => {
+    const sport  = (g?.sport || "").toUpperCase();
+    const market = mapMarketKey(g.market);
+    const strength = (g?.render?.strength || g?.sharpLabel || "").trim(); // e.g., "🟡 Lean"
+    const when = formatDateTimeET(g.time || g.commence_time);
+    const matchup = `${g.away} @ ${g.home}`;
+    const pick = pickLine(g);
+
+    const pt = playToLine(g);                    // Play-to ABOVE EV
+    const evPct = evPercentFrom(g);
+    const evLine = Number.isFinite(evPct) ? `📈 ${(evPct >= 0 ? "+" : "")}${evPct.toFixed(2)}% EV` : null;
+    const edgePct = edgePercentFrom(g);
+    const edgeLine = Number.isFinite(edgePct) ? `📊 Edge ${edgePct.toFixed(2)}%` : null;
+
+    const holdTxt = holdSuffix(g);
+    const best = bestBreakdown(g);
+    const splits = splitsLine(g);
+    const kLine = kellyLineFromEnvAndAlert(g);
+    const sLine = stakeLine(g);
+
+    const header = `${sport ? sport + " " : ""}${market}  ${strength}${holdTxt}`;
+
+    const sections = [
+      "🚨 GoSignals Alert",
+      header.trim(),
+      `🕒 ${when}\n${matchup}`,
+      pick,
+      best,
+      splits,
+      pt,        // moved here
+      evLine,
+      edgeLine,
+      kLine,
+      sLine
+    ].filter(Boolean);
+
+    return sections.join("\n\n").trim();
+  });
+}
